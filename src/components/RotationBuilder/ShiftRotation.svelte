@@ -1,5 +1,5 @@
 <script>
-    import { rotationActions } from '$lib/stores/rotationStore.svelte.js';
+    import { rotationActions, rotationStore } from '$lib/stores/rotationStore.svelte.js';
     import { uiStore } from '$lib/stores/uiStore.svelte.js';
     let { refreshUI } = $props();
     let start = $state(0);
@@ -15,8 +15,8 @@
             : {success: false, error: 'Enter a positive whole number of ticks.'};
         failed = !result.success;
         if (!result.success) { message = result.error; return; }
-        if (uiStore.extraActions.show && uiStore.extraActions.tick >= start) uiStore.extraActions.tick = Math.max(0, Math.min(299, uiStore.extraActions.tick + offset));
-        if (uiStore.bar.index >= start) uiStore.bar.index = Math.max(0, Math.min(299, uiStore.bar.index + offset));
+        if (uiStore.extraActions.show && uiStore.extraActions.tick >= start) uiStore.extraActions.tick = Math.max(0, Math.min(rotationStore.abilityBar.length - 1, uiStore.extraActions.tick + offset));
+        if (uiStore.bar.index >= start) uiStore.bar.index = Math.max(0, Math.min(rotationStore.abilityBar.length - 1, uiStore.bar.index + offset));
         message = `Moved tick ${start} and everything after it to tick ${destination}.`;
         start = destination;
         refreshUI();
@@ -27,10 +27,10 @@
     <summary>Shift rotation</summary>
     <p>Move everything from a tick onward, including swaps, stalls, releases and conditions. Use tick 0 to move the whole rotation.</p>
     <form onsubmit={event => { event.preventDefault(); shift(); }}>
-        <label>From tick <input type="number" min="0" max="299" step="1" bind:value={start} required /></label>
+        <label>From tick <input type="number" min="0" max={rotationStore.abilityBar.length - 1} step="1" bind:value={start} required /></label>
         {#if uiStore.extraActions.show}<button type="button" onclick={() => { start = uiStore.extraActions.tick; message = ''; }}>Use selected tick ({uiStore.extraActions.tick})</button>{/if}
         <label>Move <select bind:value={direction}><option value={-1}>Earlier</option><option value={1}>Later</option></select></label>
-        <label>Ticks <input type="number" min="1" max="299" step="1" bind:value={count} required /></label>
+        <label>Ticks <input type="number" min="1" max={rotationStore.abilityBar.length - 1} step="1" bind:value={count} required /></label>
         <button class="apply" type="submit">Shift rotation</button>
     </form>
     <p class="preview">Tick {start ?? '—'} → tick {Number.isFinite(destination) ? destination : '—'}. Earlier ticks stay in place.</p>

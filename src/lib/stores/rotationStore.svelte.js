@@ -1,3 +1,4 @@
+import { MAX_ROTATION_TICKS } from '$lib/calc/planner/limits';
 import { normalizeTickEvent } from '$lib/calc/rotation_builder/tickEvents';
 import { createBuffTimings, createStackTimings } from '$lib/calc/rotation_builder/rotation_consts.ts';
 import { settingsStore } from '$lib/stores/settingsStore.svelte.js';
@@ -9,7 +10,7 @@ import { migrateEquipmentSettings } from '$lib/data/equipment';
 const STORAGE_KEY = 'rotation_configs';
 export const DRAFT_STORAGE_KEY = 'rotation_draft_v1';
 const MAX_SAVED_CONFIGS = 20;
-const BAR_SIZE = 300;
+let BAR_SIZE = 300;
 const EXTRA_BAR_SIZE = 12;
 
 // Rotation store
@@ -125,10 +126,10 @@ export const rotationActions = {
 
     // One validated, atomic path for draft, file and named-save restoration.
     applyRotationData(data) {
-        if (!data || !Array.isArray(data.a) || data.a.length > BAR_SIZE)
+        if (!data || !Array.isArray(data.a) || data.a.length > MAX_ROTATION_TICKS)
             throw new Error('Invalid rotation data');
         for (const key of ['e', 'n', 't', 'r', 'c', 'v']) {
-            if (data[key] != null && (!Array.isArray(data[key]) || data[key].length > BAR_SIZE))
+            if (data[key] != null && (!Array.isArray(data[key]) || data[key].length > MAX_ROTATION_TICKS))
                 throw new Error('Invalid rotation field');
         }
         for (const key of ['a', 't', 'r']) {
@@ -137,7 +138,8 @@ export const rotationActions = {
         }
         if (data.e?.some(row => row != null && (!Array.isArray(row) || row.length > EXTRA_BAR_SIZE)))
             throw new Error('Invalid extra actions');
-        const pad = (key, transform) => Array.from({length: BAR_SIZE}, (_, i) => transform(data[key]?.[i]));
+        const size = Math.max(300, ...['a','e','n','t','r','c','v'].map(key => data[key]?.length ?? 0));
+        const pad = (key, transform) => Array.from({length: size}, (_, i) => transform(data[key]?.[i]));
         const next = {
             abilityBar: pad('a', value => value || null),
             extraActionBar: pad('e', row => row ? row.map(a => a ? (normalizeLegacy(a, gearSwaps, allExtraActions) || a) : null) : null),
@@ -149,6 +151,7 @@ export const rotationActions = {
         };
         if (data.s != null && (typeof data.s !== 'object' || Array.isArray(data.s))) throw new Error('Invalid settings');
         restoreSettings(data.s);
+        BAR_SIZE = size;
         Object.assign(rotationStore, next);
     },
 
@@ -300,6 +303,7 @@ export const rotationActions = {
 
     // Clear current rotation
     clearRotation() {
+        BAR_SIZE = 300;
         rotationStore.abilityBar = Array(BAR_SIZE).fill(null);
         rotationStore.extraActionBar = Array(BAR_SIZE).fill(null);
         rotationStore.nulledTicks = Array(BAR_SIZE).fill(false);

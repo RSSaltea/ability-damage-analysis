@@ -27,7 +27,7 @@ export function runEditorCalculation(input: ReturnType<typeof snapshotEditorCalc
     uiStore.activeTab = input.style;
     uiStore.bar.index = input.captureTick;
     uiStore.showSuggestions.value = input.showSuggestions;
-    const result = calculateTotalDamage(300);
+    const result = calculateTotalDamage(Math.max(300, input.rotation.abilityBar.length));
     const styleMap = { ranged: 'ranged', magic: 'magic', melee: 'melee', necro: 'necromancy' };
     const candidates = input.showSuggestions ? Object.entries(abils)
         .filter(([, a]) => a.title && !a.parent && a.mainStyle === styleMap[input.style])

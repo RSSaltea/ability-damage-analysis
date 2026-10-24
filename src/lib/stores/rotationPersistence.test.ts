@@ -8,6 +8,14 @@ let storage: Map<string,string>;
 beforeEach(()=>{storage=new Map();vi.stubGlobal('localStorage',{getItem:(k)=>storage.get(k)??null,setItem:(k,v)=>storage.set(k,v)});rotationActions.clearRotation();});
 afterEach(()=>vi.unstubAllGlobals());
 describe('rotation persistence',()=>{
+ it('saves and restores a generated fight beyond 300 ticks without truncation',()=>{
+  const a=Array(700).fill(null);a[650]='piercing shot';
+  rotationActions.applyRotationData({a,v:Object.assign(Array(700).fill(null),{600:{phase:'Final phase'}})});
+  expect(rotationStore.abilityBar).toHaveLength(700);
+  rotationActions.saveDraft('ranged');rotationActions.clearRotation();rotationActions.restoreDraft();
+  expect(rotationStore.abilityBar[650]).toBe('piercing shot');
+  expect(rotationStore.tickEvents[600]?.phase).toBe('Final phase');
+ });
  it('restores the complete draft and starting setup',()=>{
   rotationStore.abilityBar[3]='piercing shot';
   rotationStore.extraActionBar[3]=[{type:'ability',value:'undead slayer ability',title:'Undead Slayer',icon:''}];

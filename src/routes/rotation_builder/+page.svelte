@@ -998,8 +998,8 @@
                             </button>
                         {/each}
                     </div>
-                    <div class="timeline-footer"><span>Showing {visibleTicks} of 300 ticks</span>
-                        {#if visibleTicks < 300}<button onclick={() => expandedTicks = Math.min(300, visibleTicks + 30)}>+ 30 ticks</button>{/if}
+                    <div class="timeline-footer"><span>Showing {visibleTicks} of {rotationStore.abilityBar.length} ticks</span>
+                        {#if visibleTicks < rotationStore.abilityBar.length}<button onclick={() => expandedTicks = Math.min(rotationStore.abilityBar.length, visibleTicks + 30)}>+ 30 ticks</button>{/if}
                         <label><input type="checkbox" bind:checked={showFullTimeline} /> Show all ticks</label>
                     </div>
                     {#if rotationStore.targetCounts.some(v => v != null)}
@@ -1026,7 +1026,7 @@
 						{allAbils}
 						familiarKey={settingsStore.settings[SETTINGS.FAMILIAR]?.value ?? 'none'}
 						phaseTransitions={rotationStore.phaseTransitions}
-						barSize={uiStore.bar.size}
+						barSize={rotationStore.abilityBar.length}
 						patternStartTick={settingsStore.settings[SETTINGS.BOSS_PATTERN_START]?.value ?? -1}
 						hasBossPreset={settingsStore.settings[SETTINGS.BOSS_PRESET]?.value && settingsStore.settings[SETTINGS.BOSS_PRESET]?.value !== 'none'}
 					/>

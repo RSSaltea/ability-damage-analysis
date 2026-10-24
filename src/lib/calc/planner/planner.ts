@@ -13,6 +13,7 @@ import { startCrystalChannel } from '../rotation_builder/adrenalineEvents';
 import { CONSUMABLES } from '../../special/abilities';
 import { applyActionAmmo } from '../rotation_builder/quiver';
 import type { RotationInput } from '../types';
+import { MAX_ROTATION_TICKS } from './limits';
 
 export type Choice = { ability: string | null; ammo?: number; distance?: number };
 export interface PlannerInput {
@@ -23,6 +24,7 @@ export interface PlannerInput {
     start: number;
     end: number;
     objective: 'damage' | 'time';
+    untilTarget?: boolean;
     goal: number;
     scope: 'main' | 'all';
     iterations: number;
@@ -268,10 +270,10 @@ export function validatePlanner(input: PlannerInput) {
         !Number.isInteger(input.start) ||
         !Number.isInteger(input.end) ||
         input.start < 0 ||
-        input.end > 300 ||
+        input.end > MAX_ROTATION_TICKS ||
         input.end <= input.start
     )
-        throw Error('Choose a valid tick range within ticks 0-299.');
+        throw Error('Choose a valid tick range within the timeline capacity.');
     if (
         input.positioning &&
         (!input.positioning.distances.length ||
@@ -329,6 +331,19 @@ export function evaluatePlan(
     generate = true
 ): Plan {
     const rotation = structuredClone(input.rotation);
+    for (const key of [
+        'abilityBar',
+        'stalledAbilities',
+        'releasedAbilities',
+        'tickEvents',
+        'targetCounts',
+        'extraActionBar',
+        'nulledTicks'
+    ] as const) {
+        (rotation as any)[key] ??= [];
+        while (rotation[key]!.length < input.end)
+            (rotation[key] as any[]).push(key === 'nulledTicks' ? false : null);
+    }
     let moveUntil = -1;
     let previousDistance: number | undefined;
     const positionChoices = (items: Choice[]) =>
@@ -640,9 +655,10 @@ export async function searchRotations(
     stopped = () => false
 ) {
     validatePlanner(input);
+    input = structuredClone(input);
     const random = randomSource(input.seed),
         started = performance.now();
-    const baseline = evaluatePlan(input, [], input.seed, false);
+    let baseline = evaluatePlan(input, [], input.seed, false);
     const population: Plan[] = [];
     let best: Plan | undefined = baseline.valid ? baseline : undefined;
     let trials = 0;
@@ -658,6 +674,7 @@ export async function searchRotations(
         (key) => abils[key].abilityClassification === 'self cast'
     );
     let lastReport = 0;
+    let carriedGenes: Choice[] | undefined;
     for (
         ;
         trials < input.iterations &&
@@ -666,7 +683,10 @@ export async function searchRotations(
         trials++
     ) {
         let genes: Choice[] = [];
-        if (trials === 0) genes = seedGenes;
+        if (carriedGenes) {
+            genes = carriedGenes;
+            carriedGenes = undefined;
+        } else if (trials === 0) genes = seedGenes;
         else if (trials <= setups.length) genes = [{ ability: setups[trials - 1] }];
         else if (population.length && random() > 0.2) {
             const parent = population[Math.floor(random() * population.length)];
@@ -718,6 +738,7 @@ export async function searchRotations(
         }
         if (performance.now() - lastReport > 500 || trials === 0) {
             progress({
+                end: input.end,
                 best,
                 baseline,
                 rejected,
@@ -727,6 +748,49 @@ export async function searchRotations(
             lastReport = performance.now();
             await new Promise((resolve) => setTimeout(resolve, 0));
         }
+        // A time-to-target search has no configured combat deadline. Grow the
+        // simulation horizon until a complete kill is found, retaining its setup.
+        if (
+            input.untilTarget &&
+            input.objective === 'time' &&
+            best?.reached == null &&
+            trials + 1 < input.iterations &&
+            (trials + 1) % 8 === 0 &&
+            input.end < MAX_ROTATION_TICKS &&
+            performance.now() - started < input.seconds * 1000 &&
+            !stopped()
+        ) {
+            const oldEnd = input.end;
+            const fightStart = input.fightStart ?? input.start;
+            const span = oldEnd - fightStart;
+            const factor = best?.damage
+                ? Math.max(1.5, Math.min(3, (input.goal / best.damage) * 1.15))
+                : 2;
+            input.end = Math.min(MAX_ROTATION_TICKS, fightStart + Math.ceil(span * factor));
+            for (const phase of input.phaseGoals ?? [])
+                if (phase.end === oldEnd) phase.end = input.end;
+            carriedGenes = best?.genes.length ? best.genes : seedGenes;
+            population.length = 0;
+            baseline = evaluatePlan(input, [], input.seed, false);
+            const extended = evaluatePlan(input, carriedGenes, input.seed + trials + 1);
+            best = extended.valid ? extended : undefined;
+            if (baseline.valid && (!best || comparePlans(baseline, best, input.objective) < 0))
+                best = baseline;
+            if (extended.valid) population.push(extended);
+        }
     }
-    return { best, baseline, rejected, trials, elapsed: (performance.now() - started) / 1000 };
+    return {
+        best,
+        baseline,
+        rejected,
+        trials,
+        end: input.end,
+        limitation:
+            input.untilTarget && best?.reached == null
+                ? input.end >= MAX_ROTATION_TICKS
+                    ? 'Timeline memory safety capacity reached before finding the target.'
+                    : 'Search budget ended before a complete target-reaching rotation was found. Increase search time to keep exploring.'
+                : undefined,
+        elapsed: (performance.now() - started) / 1000
+    };
 }

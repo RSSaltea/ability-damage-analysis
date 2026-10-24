@@ -32,6 +32,22 @@ function input(): PlannerInput {
         seed: 123
     };
 }
+it('extends a time-to-target fight beyond its initial horizon and the old 300-tick bar', async () => {
+    const config = input();
+    config.abilities = [ABILITIES.MELEE_AUTO];
+    config.objective = 'time';
+    config.untilTarget = true;
+    config.end = 150;
+    config.goal = evaluatePlan({...config,end:300}, [], 1).damage * 1.2;
+    config.iterations = 9;
+    config.seconds = 20;
+    const result = await searchRotations(config);
+    expect(result.end).toBeGreaterThan(300);
+    expect(result.best?.reached).not.toBeNull();
+    expect(result.best!.damage).toBeGreaterThanOrEqual(config.goal);
+    expect(result.best!.rotation.abilityBar.length).toBeGreaterThan(300);
+    expect(config.end).toBe(150);
+});
 it('scores landing ticks only, excluding delayed damage after the deadline and setup damage', () => {
     expect(scoreImpacts([500, 1, 2, 3, 999], { start: 1, end: 4, goal: 3 })).toEqual({
         damage: 6,

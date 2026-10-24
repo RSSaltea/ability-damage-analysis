@@ -2,6 +2,7 @@
     import { onDestroy, tick as nextRender } from 'svelte';
     import { phaseStackOptions } from '$lib/calc/rotation_builder/phaseStacks';
     import { normalizeTickEvent } from '$lib/calc/rotation_builder/tickEvents';
+    import { MAX_ROTATION_TICKS } from '$lib/calc/planner/limits';
     import { SETTINGS } from '$lib/calc/settings_rb';
     import { addPreparation, damageShare } from '$lib/calc/planner/encounter';
     import { abils } from '$lib/data/abilities';
@@ -165,7 +166,7 @@
     }
     function addPhase() {
         const tick = Math.min(
-            299,
+            MAX_ROTATION_TICKS - 1,
             phases.length ? Math.max(...phases.map((p) => p.tick)) + 30 : start
         );
         if (phases.some((p) => p.tick === tick)) return;
@@ -183,20 +184,25 @@
                 throw Error('Choose the requested number of loadouts and at least one ability.');
             if (
                 !Number.isInteger(start) ||
-                !Number.isInteger(ticks) ||
                 start < 0 ||
-                ticks < 1 ||
-                start + ticks > 300
+                (objective === 'damage' &&
+                    (!Number.isInteger(ticks) || ticks < 1 || start + ticks > MAX_ROTATION_TICKS))
             )
-                throw Error('Choose a whole-tick window ending no later than tick 299.');
+                throw Error('Choose valid whole ticks within the timeline capacity.');
             const rotation = structuredClone(snapshot.rotation);
             if (
                 phases.some(
-                    (p) => !Number.isInteger(p.tick) || p.tick < 0 || p.tick > 299 || !p.name.trim()
+                    (p) =>
+                        !Number.isInteger(p.tick) ||
+                        p.tick < 0 ||
+                        p.tick >= MAX_ROTATION_TICKS ||
+                        !p.name.trim()
                 ) ||
                 new Set(phases.map((p) => p.tick)).size !== phases.length
             )
-                throw Error('Give each phase a name and a different start tick from 0 to 299.');
+                throw Error(
+                    'Give each phase a name and a different start tick within the timeline capacity.'
+                );
             for (let t = 0; t < rotation.tickEvents.length; t++)
                 if (rotation.tickEvents[t]?.phase)
                     rotation.tickEvents[t] = normalizeTickEvent({
@@ -221,8 +227,14 @@
                 ordered = setup.phases;
                 fightStart = setup.fight;
             }
-            const end = fightStart + ticks;
-            if (end > 300) throw Error('Preparation and fighting must fit within 300 ticks.');
+            const end =
+                objective === 'time'
+                    ? Math.min(
+                          MAX_ROTATION_TICKS,
+                          Math.max(fightStart + 100, ...ordered.map((p) => p.tick + 30))
+                      )
+                    : fightStart + ticks;
+            if (end > MAX_ROTATION_TICKS) throw Error('Timeline capacity exceeded.');
             for (const p of ordered)
                 rotation.tickEvents[p.tick] = normalizeTickEvent({
                     ...rotation.tickEvents[p.tick],
@@ -266,6 +278,7 @@
                     ? { positioning: { distances: [...distances], meleeOwner, moveTicks } }
                     : {}),
                 objective,
+                untilTarget: objective === 'time',
                 goal: goal * fraction,
                 scope,
                 iterations: 10000,
@@ -303,6 +316,7 @@
                     worker = undefined;
                     return;
                 }
+                if (data.end) request = { ...request!, end: data.end };
                 result = data;
                 if (data.type === 'done') {
                     running = false;
@@ -450,7 +464,7 @@
                     >Keep existing setup before tick<input
                         type="number"
                         min="0"
-                        max="299"
+                        max={MAX_ROTATION_TICKS - 1}
                         step="1"
                         bind:value={start}
                         disabled={prep}
@@ -458,20 +472,25 @@
                         >0 rebuilds from the beginning. A later tick keeps everything before it.</small
                     ></label
                 >
-                <label
-                    >{objective === 'time' ? 'Maximum search window' : 'Time limit'} (ticks)<input
-                        type="number"
-                        min="1"
-                        max={300 - start - prepTicks}
-                        step="1"
-                        bind:value={ticks}
-                    /><small
-                        >{(ticks * 0.6).toFixed(1)} seconds of fighting; starts at tick {prep
-                            ? prepTicks
-                            : start}</small
-                    ></label
-                >
+                {#if objective === 'damage'}<label
+                        >Damage comparison duration (ticks)<input
+                            type="number"
+                            min="1"
+                            max={MAX_ROTATION_TICKS - start - prepTicks}
+                            step="1"
+                            bind:value={ticks}
+                        /><small
+                            >{(ticks * 0.6).toFixed(1)} seconds of fighting; starts at tick {prep
+                                ? prepTicks
+                                : start}</small
+                        ></label
+                    >{/if}
             </div>
+            {#if objective === 'time'}<p class="note">
+                    The fight runs until your damage target and phase requirements are met. There is
+                    no configured fight deadline. Only Wars and dummy preparation have length caps;
+                    search time controls how long the computer explores alternatives.
+                </p>{/if}
             <h3>Team and damage share</h3>
             <label class="check"
                 ><input type="checkbox" bind:checked={team} /> Plan my share of a team fight</label
@@ -652,7 +671,7 @@
                             >Start tick<input
                                 type="number"
                                 min="0"
-                                max="299"
+                                max={MAX_ROTATION_TICKS - 1}
                                 step="1"
                                 bind:value={phase.tick}
                             /></label
@@ -808,7 +827,7 @@
                         >{/each}
                 </div>{/if}
             <label
-                >Search time<select bind:value={seconds}
+                >Computer search time<select bind:value={seconds}
                     ><option value={15}>Quick - 15 seconds</option><option value={30}
                         >Standard - 30 seconds</option
                     ><option value={120}>Thorough - 2 minutes</option><option value={300}
@@ -834,6 +853,7 @@
                     far.
                 </p>
                 <button onclick={stop}>Stop search</button>{/if}
+            {#if result?.limitation}<p class="note">{result.limitation}</p>{/if}
             {#if result?.best}
                 <div class="results">
                     <div>
@@ -853,7 +873,7 @@
                     {#if request.objective === 'time'}<div>
                             <span>Time to damage target</span><strong
                                 >{result.best.reached === null
-                                    ? 'Not reached in this window'
+                                    ? 'No complete rotation found yet'
                                     : (
                                           (result.best.reached -
                                               ((request.fightStart ?? request.start) -
@@ -925,7 +945,12 @@
                                 </li>{/if}{/each}
                     </ol>
                 </details>
-                <button class="primary" disabled={running || applied} onclick={apply}
+                <button
+                    class="primary"
+                    disabled={running ||
+                        applied ||
+                        (request.objective === 'time' && result.best.reached === null)}
+                    onclick={apply}
                     >{applied ? 'Applied to timeline' : 'Apply to searched ticks'}</button
                 >
                 {#if applied}<button onclick={undo}>Undo planner changes</button>{/if}

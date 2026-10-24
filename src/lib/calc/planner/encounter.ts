@@ -1,3 +1,4 @@
+import { MAX_ROTATION_TICKS } from './limits';
 import type { RotationInput } from '../types';
 
 export function damageShare(dealers: number, extras: number, contribution: number) {
@@ -30,7 +31,7 @@ export function addPreparation(
     rotation.targetCounts ??= Array(300).fill(null);
     rotation.tickEvents ??= Array(300).fill(null);
     const fight = wars + travel + dummy;
-    if (fight >= 300) throw Error('Leave room for fighting within the 300-tick timeline.');
+    if (fight >= MAX_ROTATION_TICKS) throw Error('Preparation exceeds the timeline capacity.');
     let ordered = phases
         .filter((p) => !/^(wars|war.s retreat|travel|prebuild)$/i.test(p.name.trim()))
         .sort((a, b) => a.tick - b.tick);
@@ -49,16 +50,21 @@ export function addPreparation(
         const values = rotation[key];
         if (!values) continue;
         const before = structuredClone(values);
-        for (let t = 0; t < 300; t++)
+        values.length = Math.min(MAX_ROTATION_TICKS, Math.max(300, before.length + offset));
+        for (
+            let t = 0;
+            t < Math.min(MAX_ROTATION_TICKS, Math.max(300, before.length + offset));
+            t++
+        )
             (values as any)[t] =
                 key === 'extraActionBar' ? [] : key === 'nulledTicks' ? false : null;
         for (let t = oldStart; t < before.length; t++) {
             const value = before[t];
             const occupied = Array.isArray(value) ? value.length > 0 : !!value;
-            if (t + offset >= 300) {
+            if (t + offset >= MAX_ROTATION_TICKS) {
                 if (occupied)
                     throw Error(
-                        'Preparation would push an existing action beyond tick 299. Shorten it first.'
+                        'Preparation would push an existing action beyond the timeline capacity. Shorten it first.'
                     );
             } else (values as any)[t + offset] = value;
         }
@@ -66,8 +72,8 @@ export function addPreparation(
     ordered = ordered.map((p) => ({ ...p, tick: p.tick - oldStart + fight }));
     if (!ordered.length)
         ordered = [{ tick: fight, name: 'Phase 1', downtime: 0, clearStacks: [], damage: 0 }];
-    if (ordered.some((p) => p.tick >= 300))
-        throw Error('A shifted phase falls beyond tick 299. Shorten preparation.');
+    if (ordered.some((p) => p.tick >= MAX_ROTATION_TICKS))
+        throw Error('A shifted phase falls beyond the timeline capacity. Shorten preparation.');
     for (let t = 0; t < fight; t++) {
         rotation.extraActionBar[t] = [];
         rotation.tickEvents![t] = null;
