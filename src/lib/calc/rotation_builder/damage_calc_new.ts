@@ -48,6 +48,7 @@ const logger = Logger.getInstance();
  * later at release time).
  */
 function on_stall(settings: Record<string, any>, abilityKey: string, timers?: Record<string, number>, stalled = false) {
+    settings._stackCastSerial = (settings._stackCastSerial ?? 0) + 1;
     if (!consumeDeathsporeBuff(settings, abilityKey, timers)) handleAdrenalineCost(settings, abilityKey, timers);
     if (timers) startCooldown(timers, abilityKey, settings);
     if (stalled) return;

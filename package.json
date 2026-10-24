@@ -9,7 +9,9 @@
         "preview": "vite preview",
         "test": "vitest",
         "lint": "prettier --check . && eslint .",
-        "format": "prettier --write ."
+        "format": "prettier --write .",
+        "build:vorkath": "vite build --mode vorkath",
+        "start:vorkath": "vite dev --mode vorkath --port 3000"
     },
     "devDependencies": {
         "@eslint/js": "^9.15.0",

@@ -217,7 +217,7 @@ function applyStackEffects(ctx: EffectContext): void {
     }
 
     // Deduplicate: multihit sub-hits share the same key
-    const castId = settings['ability'] + ':' + abilityKey;
+    const castId = (settings._stackCastSerial ?? 0) + ':' + settings['ability'] + ':' + abilityKey;
     if (settings['_last_stack_ability_melee'] === castId) return;
     settings['_last_stack_ability_melee'] = castId;
 

@@ -55,6 +55,8 @@ function getVulnMultiplier(settings: Record<string, any>): number {
 
 interface RotationState {
     phaseDamagePerTick?: number[];
+    impactDamagePerTick?: number[];
+    mainImpactDamagePerTick?: number[];
     phaseEvents?: RotationInput["tickEvents"];
     activeTarget?: string;
     flameboundTargets?: Record<string, boolean>;
@@ -142,6 +144,8 @@ interface TickMeta {
 
 interface DamageResult {
     phaseDamagePerTick?: number[];
+    impactDamagePerTick?: number[];
+    mainImpactDamagePerTick?: number[];
     phaseEvents?: RotationInput["tickEvents"];
     activeTarget?: string;
     flameboundTargets?: Record<string, boolean>;
@@ -432,6 +436,8 @@ export function calculateRotationDamageCore(
     return {
         regularDamage: totalDamage,
         phaseDamagePerTick: state.phaseDamagePerTick ?? [],
+        impactDamagePerTick: state.impactDamagePerTick ?? [],
+        mainImpactDamagePerTick: state.mainImpactDamagePerTick ?? [],
         secondaryDamage: state.secondaryDamage ?? {},
         secondaryHits: state.secondaryHits ?? [],
         poisonDamage: state.poisonDamage,
@@ -744,13 +750,18 @@ function processTickOperations(
     const otherDamage = () => state.poisonDamage + state.scrollDamage + state.dreadnipDamage + state.conjureDamage
         + Object.values(state.secondaryDamage ?? {}).reduce((sum: number, damage: number) => sum + damage, 0);
     const otherBefore = otherDamage();
+    const secondaryBefore = Object.values(state.secondaryDamage ?? {}).reduce((a, b) => a + b, 0);
     processQueuedDamage(tickToProcess, state, settingsCopy);
     handleAftershock(state, settingsCopy);
     handleCrackling(state, settingsCopy);
     processSecondaryDamageWithBudget(state, settingsCopy);
     updateBossHpPercent(state, settingsCopy);
-    (state.phaseDamagePerTick ??= [])[tickToProcess] = (state.phaseDamagePerTick[tickToProcess] ?? 0) + state.dmgs.slice(firstHit).reduce((sum, damage) => sum + damage, 0)
-        + otherDamage() - otherBefore;
+    const impactDamage = state.dmgs.slice(firstHit).reduce((sum, damage) => sum + damage, 0) + otherDamage() - otherBefore;
+    (state.phaseDamagePerTick ??= [])[tickToProcess] = (state.phaseDamagePerTick[tickToProcess] ?? 0) + impactDamage;
+    // Search objectives need actual landing time, not cast-phase attribution.
+    (state.impactDamagePerTick ??= [])[tickToProcess] = impactDamage;
+    (state.mainImpactDamagePerTick ??= [])[tickToProcess] = impactDamage
+        - Object.values(state.secondaryDamage ?? {}).reduce((a, b) => a + b, 0) + secondaryBefore;
 
     state.tick += 1;
 }

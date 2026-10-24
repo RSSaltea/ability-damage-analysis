@@ -210,7 +210,7 @@ function applyStackEffects(ctx: EffectContext): void {
     // Deduplicate: multihit sub-hits share the same key (e.g. 'wild magic hit')
     // and fire multiple on_hit calls in the same cast. Use settings['ability']
     // (set to parent key in on_cast) plus this hit key to detect repeats.
-    const castId = settings['ability'] + ':' + abilityKey;
+    const castId = (settings._stackCastSerial ?? 0) + ':' + settings['ability'] + ':' + abilityKey;
     if (settings['_last_stack_ability'] === castId) return;
     settings['_last_stack_ability'] = castId;
 

@@ -1,0 +1,898 @@
+<script lang="ts">
+    import { onDestroy, tick as nextRender } from 'svelte';
+    import { phaseStackOptions } from '$lib/calc/rotation_builder/phaseStacks';
+    import { normalizeTickEvent } from '$lib/calc/rotation_builder/tickEvents';
+    import { SETTINGS } from '$lib/calc/settings_rb';
+    import { abils } from '$lib/data/abilities';
+    import { getEquipment, equipment } from '$lib/data/equipment';
+    import { bossPresets } from '$lib/data/bosses/boss_presets';
+    import { attachGearPerks } from '$lib/data/perks';
+    import {
+        plannerAbilities,
+        equipmentAllows,
+        type PlannerInput
+    } from '$lib/calc/planner/planner';
+    import { snapshotEditorCalculation } from '$lib/calc/rotation_builder/editorCalculation';
+    import { resolveQuiverAmmo } from '$lib/calc/rotation_builder/quiver';
+    import { rotationActions } from '$lib/stores/rotationStore.svelte.js';
+    let { refreshUI } = $props();
+    let dialog = $state<HTMLDialogElement>();
+    let open = $state(false),
+        step = $state(0),
+        running = $state(false),
+        error = $state(''),
+        applied = $state(false);
+    let snapshot: any = $state.raw(null),
+        original: any,
+        fingerprint = '';
+    let request = $state.raw<PlannerInput>();
+    let result: any = $state.raw(null),
+        worker: Worker | undefined;
+    let mode = $state(1),
+        stayInBurst = $state(true),
+        stackDetours = $state(true);
+    let phases = $state<any[]>([]);
+    let styles = $state(['ranged']),
+        allowed = $state<string[]>([]),
+        ammo = $state<number[]>([]);
+    let settings: any = $state({});
+    let objective = $state<'time' | 'damage'>('time'),
+        goal = $state(700000),
+        start = $state(0),
+        ticks = $state(100);
+    let scope = $state<'all' | 'main'>('all'),
+        seconds = $state(30),
+        search = $state(''),
+        targets = $state(1);
+    const styleLabels = [
+        ['ranged', 'Ranged'],
+        ['melee', 'Melee'],
+        ['magic', 'Magic'],
+        ['necromancy', 'Necromancy']
+    ];
+    const stackFields = [
+        [SETTINGS.ADRENALINE, 'Adrenaline', 130],
+        [SETTINGS.BLOODLUST_STACKS, 'Bloodlust', 8],
+        [SETTINGS.PRIMORDIAL_ICE, 'Primordial Ice', 5],
+        [SETTINGS.ICY_CHILL_STACKS, 'Wen / Icy Chill', 10],
+        [SETTINGS.PERFECT_EQUILIBRIUM_STACKS, 'Bow of the Last Guardian', 7],
+        [SETTINGS.DEATHSPORE_STACKS, 'Deathspore', 5],
+        [SETTINGS.BIK_STACKS, 'Bik', 150],
+        [SETTINGS.REAPER_STACKS, 'Reaper necklace', 30],
+        [SETTINGS.NECROSIS_STACKS, 'Necrosis', 12],
+        [SETTINGS.RESIDUAL_SOULS, 'Residual souls', 5],
+        [SETTINGS.BLOOD_TITHE, 'Blood Tithe', 12],
+        [SETTINGS.GLACIAL_EMBRACE, 'Glacial Embrace', 5]
+    ] as const;
+    let candidates = $derived(snapshot ? plannerAbilities(settings, styles) : []);
+    let shown = $derived(
+        candidates.filter((key) =>
+            (abils[key].title ?? key).toLowerCase().includes(search.toLowerCase())
+        )
+    );
+    let ammunition = $derived.by(() => {
+        const weapon = getEquipment(
+            settings[
+                settings[SETTINGS.WEAPON_TYPE_RANGED] === 'two-hand'
+                    ? SETTINGS.RANGED_TH
+                    : SETTINGS.RANGED_MH
+            ]
+        );
+        const kind = weapon?.type === 'crossbow' ? /bolts/i : /arrows/i;
+        return Object.values(equipment)
+            .filter((item) => item.slot === 'ammo' && kind.test(item.name))
+            .sort((a, b) => a.name.localeCompare(b.name));
+    });
+    function chooseDefaults() {
+        allowed = plannerAbilities(settings, styles).filter((key) =>
+            equipmentAllows(key, settings, false)
+        );
+    }
+    async function begin() {
+        snapshot = snapshotEditorCalculation();
+        original = rotationActions.getCurrentRotationData();
+        fingerprint = JSON.stringify(original);
+        settings = structuredClone(snapshot.settings);
+        styles = [
+            snapshot.style === 'necro'
+                ? 'necromancy'
+                : snapshot.style === 'defence'
+                  ? 'ranged'
+                  : snapshot.style
+        ];
+        mode = 1;
+        phases = snapshot.rotation.tickEvents.flatMap((event: any, tick: number) =>
+            event?.phase
+                ? [
+                      {
+                          tick,
+                          name: event.phase,
+                          downtime: event.downtime ?? 0,
+                          clearStacks: event.clearStacks ?? [],
+                          damage: 0
+                      }
+                  ]
+                : []
+        );
+        ammo = [];
+        const current = resolveQuiverAmmo(settings);
+        if (typeof current === 'number') ammo = [current];
+        targets = Number(snapshot.rotation.targetCounts.find((n: any) => n != null) ?? 1);
+        chooseDefaults();
+        step = 0;
+        error = '';
+        result = null;
+        applied = false;
+        open = true;
+        await nextRender();
+        dialog.showModal();
+    }
+    function selectStyle(style: string, checked: boolean) {
+        styles = checked ? [...styles, style] : styles.filter((s) => s !== style);
+        chooseDefaults();
+    }
+    function setMode(value: number) {
+        mode = value;
+        styles = [
+            ...styles,
+            ...styleLabels.map(([key]) => key).filter((key) => !styles.includes(key))
+        ].slice(0, mode);
+        chooseDefaults();
+    }
+    function addPhase() {
+        const tick = Math.min(
+            299,
+            phases.length ? Math.max(...phases.map((p) => p.tick)) + 30 : start
+        );
+        if (phases.some((p) => p.tick === tick)) return;
+        phases = [
+            ...phases,
+            { tick, name: `Phase ${phases.length + 1}`, downtime: 0, clearStacks: [], damage: 0 }
+        ];
+    }
+    function run() {
+        error = '';
+        result = null;
+        applied = false;
+        try {
+            if (styles.length !== mode || !allowed.length)
+                throw Error('Choose the requested number of loadouts and at least one ability.');
+            if (
+                !Number.isInteger(start) ||
+                !Number.isInteger(ticks) ||
+                start < 0 ||
+                ticks < 1 ||
+                start + ticks > 300
+            )
+                throw Error('Choose a whole-tick window ending no later than tick 299.');
+            const rotation = structuredClone(snapshot.rotation);
+            if (
+                phases.some(
+                    (p) => !Number.isInteger(p.tick) || p.tick < 0 || p.tick > 299 || !p.name.trim()
+                ) ||
+                new Set(phases.map((p) => p.tick)).size !== phases.length
+            )
+                throw Error('Give each phase a name and a different start tick from 0 to 299.');
+            for (let t = 0; t < rotation.tickEvents.length; t++)
+                if (rotation.tickEvents[t]?.phase)
+                    rotation.tickEvents[t] = normalizeTickEvent({
+                        ...rotation.tickEvents[t],
+                        phase: undefined,
+                        clearStacks: undefined,
+                        downtime: undefined
+                    });
+            const ordered = [...phases].sort((a, b) => a.tick - b.tick);
+            for (const p of ordered)
+                rotation.tickEvents[p.tick] = normalizeTickEvent({
+                    ...rotation.tickEvents[p.tick],
+                    phase: p.name,
+                    downtime: p.downtime,
+                    clearStacks: p.clearStacks
+                });
+            rotation.targetCounts[start] = targets;
+            rotation.tickEvents[start] = {
+                ...rotation.tickEvents[start],
+                target: settings[SETTINGS.BOSS_PRESET],
+                automaticAccuracy: settings[SETTINGS.AUTO_ACCURACY],
+                accuracy: settings[SETTINGS.HIT_CHANCE],
+                ghraziDistance: settings[SETTINGS.GHRAZI_DISTANCE]
+            };
+            const clean = JSON.parse(JSON.stringify(settings));
+            attachGearPerks(clean, new Map(snapshot.ownedGear));
+            request = {
+                settings: clean,
+                rotation,
+                abilities: allowed.filter((key) => candidates.includes(key)),
+                ammo: styles.includes('ranged') ? [...ammo] : [],
+                start,
+                end: start + ticks,
+                objective,
+                goal,
+                scope,
+                iterations: 10000,
+                seconds,
+                seed: Date.now() >>> 0,
+                stayInBurst,
+                stackDetours,
+                phaseGoals: ordered.flatMap((p, i) =>
+                    p.damage > 0 &&
+                    p.tick < start + ticks &&
+                    (ordered[i + 1]?.tick ?? start + ticks) > start
+                        ? [
+                              {
+                                  name: p.name,
+                                  start: Math.max(start, p.tick),
+                                  end: Math.min(
+                                      start + ticks,
+                                      ordered[i + 1]?.tick ?? start + ticks
+                                  ),
+                                  damage: p.damage
+                              }
+                          ]
+                        : []
+                )
+            };
+            worker?.terminate();
+            const currentWorker = new Worker(
+                new URL('../../lib/calc/planner/planner.worker.ts', import.meta.url),
+                { type: 'module' }
+            );
+            worker = currentWorker;
+            running = true;
+            step = 3;
+            currentWorker.onmessage = ({ data }) => {
+                if (worker !== currentWorker) return;
+                if (data.type === 'error') {
+                    error = data.error;
+                    running = false;
+                    currentWorker.terminate();
+                    worker = undefined;
+                    return;
+                }
+                result = data;
+                if (data.type === 'done') {
+                    running = false;
+                    currentWorker.terminate();
+                    worker = undefined;
+                }
+            };
+            currentWorker.onerror = () => {
+                error =
+                    'The planner could not run. Try a shorter window or fewer allowed abilities.';
+                running = false;
+                currentWorker.terminate();
+                worker = undefined;
+            };
+            currentWorker.postMessage({ input: request });
+        } catch (e: any) {
+            error = e.message;
+            running = false;
+        }
+    }
+    function stop() {
+        worker?.terminate();
+        worker = undefined;
+        running = false;
+    }
+    let displayEnd = $derived(
+        result?.best && request?.objective === 'time' && result.best.reached !== null
+            ? Math.min(request.end, request.start + result.best.reached + 1)
+            : request?.end
+    );
+    function apply() {
+        if (!result?.best || running) return;
+        if (JSON.stringify(rotationActions.getCurrentRotationData()) !== fingerprint) {
+            error =
+                'The editor changed since this search started. Reopen the planner to use the new setup.';
+            return;
+        }
+        const r = structuredClone(result.best.rotation);
+        for (let t = displayEnd; t < request.end; t++) {
+            r.abilityBar[t] = null;
+            r.stalledAbilities[t] = null;
+            if (r.releasedAbilities) r.releasedAbilities[t] = null;
+        }
+        rotationActions.applyRotationData({
+            ...original,
+            a: r.abilityBar,
+            e: r.extraActionBar,
+            n: r.nulledTicks,
+            t: r.stalledAbilities,
+            r: r.releasedAbilities,
+            c: r.targetCounts,
+            v: r.tickEvents,
+            s: JSON.parse(JSON.stringify(settings))
+        });
+        refreshUI();
+        applied = true;
+    }
+    function undo() {
+        if (!applied) return;
+        rotationActions.applyRotationData(original);
+        refreshUI();
+        applied = false;
+    }
+    function close() {
+        stop();
+        dialog?.close();
+        open = false;
+    }
+    function points(curve: number[]) {
+        const max = Math.max(1, ...(result?.best?.curve ?? []), ...(result?.baseline?.curve ?? []));
+        return curve
+            .map((y, i) => `${(i / Math.max(1, curve.length - 1)) * 600},${150 - (y / max) * 140}`)
+            .join(' ');
+    }
+    onDestroy(stop);
+</script>
+
+<button class="planner-launch" onclick={begin}>Build a rotation <span>Vorkath planner</span></button
+>
+{#if open}
+    <dialog
+        bind:this={dialog}
+        class="planner"
+        aria-label="Vorkath rotation planner"
+        oncancel={close}
+    >
+        <header>
+            <div>
+                <h2>Build a rotation</h2>
+                <p>Find a stronger sequence for your setup.</p>
+            </div>
+            <button onclick={close} aria-label="Close planner">Close</button>
+        </header>
+        <nav aria-label="Planner steps">
+            {#each ['Fight & goal', 'Loadouts & stacks', 'Allowed actions', 'Search & compare'] as label, i}<button
+                    disabled={running || (i === 3 && !result)}
+                    class:active={step === i}
+                    onclick={() => (step = i)}>{i + 1}. {label}</button
+                >{/each}
+        </nav>
+        {#if error}<p class="error" role="alert">{error}</p>{/if}
+        {#if step === 0}
+            <h3>What are you trying to achieve?</h3>
+            <div class="fields">
+                <label
+                    >Goal<select bind:value={objective}
+                        ><option value="time">Reach a damage target as quickly as possible</option
+                        ><option value="damage">Most damage within a time limit</option></select
+                    ></label
+                >
+                {#if objective === 'time'}<label
+                        >Damage / remaining HP target<input
+                            type="number"
+                            min="1"
+                            bind:value={goal}
+                        /></label
+                    >{/if}
+                <label
+                    >Count damage to<select bind:value={scope}
+                        ><option value="all">All targets combined</option><option value="main"
+                            >Main target only</option
+                        ></select
+                    ></label
+                >
+                <label
+                    >Fighting<select bind:value={settings[SETTINGS.BOSS_PRESET]}
+                        ><option value="none">Custom target</option
+                        >{#each Object.keys(bossPresets).sort() as key}<option value={key}
+                                >{bossPresets[key].name}</option
+                            >{/each}</select
+                    ></label
+                >
+                <label
+                    >Targets in range<input
+                        type="number"
+                        min="1"
+                        max="25"
+                        step="1"
+                        bind:value={targets}
+                    /></label
+                >
+                <label
+                    >Start tick<input
+                        type="number"
+                        min="0"
+                        max="299"
+                        step="1"
+                        bind:value={start}
+                    /></label
+                >
+                <label
+                    >{objective === 'time' ? 'Maximum search window' : 'Time limit'} (ticks)<input
+                        type="number"
+                        min="1"
+                        max={300 - start}
+                        step="1"
+                        bind:value={ticks}
+                    /><small
+                        >{(ticks * 0.6).toFixed(1)} seconds; ticks {start} to {start + ticks - 1} inclusive</small
+                    ></label
+                >
+            </div>
+            <label class="check"
+                ><input type="checkbox" bind:checked={settings[SETTINGS.AUTO_ACCURACY]} /> Calculate
+                accuracy from target and gear</label
+            >
+            {#if !settings[SETTINGS.AUTO_ACCURACY]}<label
+                    >Damage potential (%)<input
+                        type="number"
+                        min="0"
+                        max="100"
+                        bind:value={settings[SETTINGS.HIT_CHANCE]}
+                    /></label
+                >{/if}
+            {#if /ghrazi/i.test(settings[SETTINGS.BOSS_PRESET] ?? '')}<label
+                    >Distance between knights<select bind:value={settings[SETTINGS.GHRAZI_DISTANCE]}
+                        ><option value={3}>3+ clear tiles</option><option value={2}
+                            >2 clear tiles</option
+                        ><option value={1}>1 clear tile</option><option value={0}
+                            >Overlapping</option
+                        ></select
+                    ></label
+                >{/if}
+            <p class="note">
+                Actions before the start tick are kept as setup. Existing phase boundaries, target
+                changes, off-GCD actions, gear swaps and adrenaline overrides stay fixed. Casts
+                inside the search window are replaced only when you apply a result.
+            </p>
+            <details class="phases">
+                <summary>Fight phases ({phases.length})</summary>
+                <p class="note">
+                    Set scheduled phase starts and invulnerable ticks. Cooldowns and resources carry
+                    between phases unless you select a reset. Optional damage requirements must be
+                    met before the next phase; the search prioritises meeting all of them. Known
+                    boss HP-triggered transitions are also simulated from the selected boss preset.
+                </p>
+                {#each phases as phase, i}<div class="phase-row">
+                        <label>Phase name<input bind:value={phase.name} /></label><label
+                            >Start tick<input
+                                type="number"
+                                min="0"
+                                max="299"
+                                step="1"
+                                bind:value={phase.tick}
+                            /></label
+                        ><label
+                            >Invulnerable ticks<input
+                                type="number"
+                                min="0"
+                                max="300"
+                                step="1"
+                                bind:value={phase.downtime}
+                            /></label
+                        ><label
+                            >Damage required in phase (0 = none)<input
+                                type="number"
+                                min="0"
+                                bind:value={phase.damage}
+                            /></label
+                        ><label class="check"
+                            ><input
+                                type="checkbox"
+                                checked={!!phase.clearStacks.length}
+                                onchange={(e) =>
+                                    (phase.clearStacks = e.currentTarget.checked
+                                        ? phaseStackOptions.map(([key]) => key)
+                                        : [])}
+                            />Clear stacks at start</label
+                        ><button onclick={() => (phases = phases.filter((_, j) => i !== j))}
+                            >Remove phase</button
+                        >
+                    </div>{/each}
+                <button onclick={addPhase}>Add phase</button>
+            </details>
+            <button class="primary" onclick={() => (step = 1)}>Next: loadouts & stacks</button>
+        {:else if step === 1}
+            <h3>Which configured loadouts may it use?</h3>
+            <p class="note">
+                Uses your current editor gear, perks, relics, familiar and buffs. Check only
+                loadouts you can use. With multiple styles selected, it searches style switches
+                using those loadouts. Change equipment in the editor before opening the planner.
+            </p>
+            <label
+                >Combat mode<select
+                    value={mode}
+                    onchange={(e) => setMode(Number(e.currentTarget.value))}
+                    ><option value={1}>Single style</option><option value={2}
+                        >Brid - two styles</option
+                    ><option value={3}>Tribrid - three styles</option><option value={4}
+                        >All four styles</option
+                    ></select
+                ></label
+            >
+            <label class="check"
+                ><input type="checkbox" bind:checked={stayInBurst} /> Stay in the burst style during
+                Berserk, Death's Swiftness, Sunshine or Living Death</label
+            >
+            {#if stayInBurst}<label class="check"
+                    ><input type="checkbox" bind:checked={stackDetours} /> Allow one stack-building basic
+                    in another style, then return</label
+                >{/if}
+            <p class="note">
+                Stack detours are candidates, not mandatory switches. They only replace a full burst
+                sequence if the complete result is better. Untick the burst restriction to let the
+                search try unrestricted switches.
+            </p>
+            <div class="loadouts">
+                {#each styleLabels as [style, label]}<label class="check"
+                        ><input
+                            type="checkbox"
+                            checked={styles.includes(style)}
+                            disabled={!styles.includes(style) && styles.length >= mode}
+                            onchange={(e) => selectStyle(style, e.currentTarget.checked)}
+                        />{label}</label
+                    >{/each}
+            </div>
+            {#each styles as style}{@const prefix =
+                    style === 'necromancy' ? 'necro' : style}{@const type =
+                    settings['weapon type ' + (style === 'magic' ? 'mage' : prefix)]}
+                <p>
+                    {styleLabels.find(([key]) => key === style)?.[1]}:
+                    <strong
+                        >{getEquipment(
+                            settings[
+                                `${prefix} ${type === 'two-hand' ? 'two-hand' : 'main-hand'} weapon`
+                            ]
+                        )?.title ?? 'Custom weapon'}</strong
+                    >
+                </p>{/each}
+            <h3>What resources do you start with?</h3>
+            <p class="note">
+                These are tick-0 values. Any setup before the search window changes them naturally.
+                Bloodlust, arrow stacks and other resources then evolve on every hit and cast.
+            </p>
+            <div class="fields">
+                {#each stackFields as [key, label, max]}<label
+                        >{label}<input
+                            type="number"
+                            min="0"
+                            {max}
+                            step="1"
+                            value={settings[key] ?? 0}
+                            onchange={(e) =>
+                                (settings[key] = Math.max(
+                                    0,
+                                    Math.min(max, Number(e.currentTarget.value))
+                                ))}
+                        /></label
+                    >{/each}
+            </div>
+            <button class="primary" onclick={() => (step = 2)}>Next: allowed actions</button>
+        {:else if step === 2}
+            <h3>Which abilities and specials can you use?</h3>
+            <p class="note">
+                Untick locked abilities or actions you cannot perform. Weapon-compatible specials
+                are selected by default. Other listed specials require the selected weapon inside
+                your equipped Essence of Finality; tick only those you actually have. Buff abilities
+                are included so the search can trade early damage for a stronger finish.
+            </p>
+            <input
+                aria-label="Find an ability"
+                placeholder="Find an ability..."
+                bind:value={search}
+            />
+            <div class="ability-list">
+                {#each shown as key}<label class="check"
+                        ><input
+                            type="checkbox"
+                            checked={allowed.includes(key)}
+                            onchange={(e) =>
+                                (allowed = e.currentTarget.checked
+                                    ? [...allowed, key]
+                                    : allowed.filter((k) => k !== key))}
+                        />{abils[key].title}{#if abils[key].abilityType === 'special attack'}<small
+                                >Special</small
+                            >{/if}</label
+                    >{/each}
+            </div>
+            {#if styles.includes('ranged')}<h3>Which ammunition may it switch between?</h3>
+                <p class="note">
+                    Select ammunition you have. With no selections it keeps the equipped ammunition
+                    and existing swaps. Selected ammo switches occur before casts; the simulator
+                    still resolves hit-time effects separately.
+                </p>
+                <div class="ability-list ammo">
+                    {#each ammunition as item}<label class="check"
+                            ><input
+                                type="checkbox"
+                                checked={ammo.includes(item.id)}
+                                onchange={(e) =>
+                                    (ammo = e.currentTarget.checked
+                                        ? [...ammo, item.id]
+                                        : ammo.filter((id) => id !== item.id))}
+                            />{item.title}</label
+                        >{/each}
+                </div>{/if}
+            <label
+                >Search time<select bind:value={seconds}
+                    ><option value={15}>Quick - 15 seconds</option><option value={30}
+                        >Standard - 30 seconds</option
+                    ><option value={120}>Thorough - 2 minutes</option><option value={300}
+                        >Deep - 5 minutes</option
+                    ></select
+                ></label
+            >
+            <p class="note">
+                Searches complete sequences, including waits, using expected damage and adrenaline.
+                It preserves your scripted utilities, conjures, stalls and releases outside the
+                search window; it does not invent new pre-fight crystal use or unconfigured
+                equipment swaps. Results depend on the simulator's accuracy and are the best found,
+                not a proof of the global optimum.
+            </p>
+            <button class="primary" onclick={run}>Search rotations</button>
+        {:else}
+            <h3>{running ? 'Searching full rotations...' : 'Best rotation found'}</h3>
+            {#if result}<p role="status">
+                    {result.trials} rotations checked in {result.elapsed.toFixed(1)} seconds
+                </p>{/if}
+            {#if running}<p>
+                    The editor remains responsive. You can stop and keep the best result found so
+                    far.
+                </p>
+                <button onclick={stop}>Stop search</button>{/if}
+            {#if result?.best}
+                <div class="results">
+                    <div>
+                        <span>Expected damage by finish</span><strong
+                            >{Math.round(
+                                result.best.curve[displayEnd - request.start - 1] ?? 0
+                            ).toLocaleString()}</strong
+                        >
+                    </div>
+                    <div>
+                        <span>Current rotation at the same time</span><strong
+                            >{Math.round(
+                                result.baseline.curve[displayEnd - request.start - 1] ?? 0
+                            ).toLocaleString()}</strong
+                        >
+                    </div>
+                    {#if request.objective === 'time'}<div>
+                            <span>Time to damage target</span><strong
+                                >{result.best.reached === null
+                                    ? 'Not reached in this window'
+                                    : (result.best.reached * 0.6).toFixed(1) + ' seconds'}</strong
+                            >
+                        </div>{/if}
+                </div>
+                {#if !result.baseline.valid}<p class="note">
+                        The current rotation contains an unavailable cast under these choices, so
+                        its damage is shown for reference only.
+                    </p>{/if}
+                <svg
+                    viewBox="0 0 600 160"
+                    role="img"
+                    aria-label="Cumulative damage over the search window: gold is the best found rotation; grey is the current rotation"
+                    ><polyline
+                        points={points(result.baseline.curve)}
+                        fill="none"
+                        stroke="#798a94"
+                        stroke-width="2"
+                    /><polyline
+                        points={points(result.best.curve)}
+                        fill="none"
+                        stroke="#e4c377"
+                        stroke-width="3"
+                    /></svg
+                >
+                <p class="note">
+                    Cumulative damage: gold = best found; grey = current rotation. Only hits landing
+                    inside the window count.
+                </p>
+                {#if result.best.phaseOutcomes?.length}<h3>Phase requirements</h3>
+                    <ul>
+                        {#each result.best.phaseOutcomes as phase}<li>
+                                {phase.name}: {Math.round(phase.damage).toLocaleString()} / {Math.round(
+                                    phase.goal
+                                ).toLocaleString()} damage {phase.reached === null
+                                    ? '(not reached)'
+                                    : '(met)'}
+                            </li>{/each}
+                    </ul>{/if}
+                {#if request.objective === 'time' && result.best.reached !== null}<p class="note">
+                        The proposed casts finish once the damage target and all phase requirements
+                        are met.
+                    </p>{/if}
+                <details>
+                    <summary>Review the proposed casts</summary>
+                    <ol>
+                        {#each result.best.rotation.abilityBar.slice(request.start, displayEnd) as ability, i}{#if ability}<li
+                                >
+                                    Tick {request.start + i}: {abils[ability]?.title ??
+                                        ability}{#if result.best.rotation.tickEvents?.[request.start + i]?.castAmmo}
+                                        / {getEquipment(
+                                            result.best.rotation.tickEvents[request.start + i]
+                                                .castAmmo
+                                        )?.title}{/if}
+                                </li>{/if}{/each}
+                    </ol>
+                </details>
+                <button class="primary" disabled={running || applied} onclick={apply}
+                    >{applied ? 'Applied to timeline' : 'Apply to searched ticks'}</button
+                >
+                {#if applied}<button onclick={undo}>Undo planner changes</button>{/if}
+            {:else if !running}<p>
+                    No valid result was found. Check your allowed abilities, gear and starting
+                    resources.
+                </p>{/if}
+            {#if !running}<button onclick={() => (step = 2)}>Change choices / search again</button
+                >{/if}
+        {/if}
+    </dialog>
+{/if}
+
+<style>
+    .planner-launch {
+        padding: 10px 16px;
+        background: #253a40;
+        border: 1px solid #bda56b;
+        color: #e4c377;
+        border-radius: 5px;
+        margin: 8px 0;
+    }
+    .planner-launch span {
+        font-size: 11px;
+        color: #a6c6d5;
+        margin-left: 12px;
+    }
+    .planner::backdrop {
+        background: #000b;
+    }
+    .planner {
+        margin: auto;
+        width: min(900px, calc(100% - 32px));
+        max-height: 90vh;
+        overflow: auto;
+        background: #161e22;
+        color: #c4deed;
+        border: 1px solid #4d6672;
+        border-radius: 10px;
+        padding: 24px;
+        box-shadow: 0 20px 70px #0008;
+    }
+    .planner header {
+        display: flex;
+        justify-content: space-between;
+        align-items: start;
+        gap: 20px;
+    }
+    .planner h2 {
+        font-size: 24px;
+        color: #e4c377;
+        margin: 0;
+    }
+    .planner h3 {
+        font-size: 18px;
+        margin: 20px 0 12px;
+    }
+    .planner nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+        margin: 18px 0;
+    }
+    .planner button {
+        padding: 8px 12px;
+        border: 1px solid #536975;
+        border-radius: 4px;
+        background: #24323a;
+        color: #c4deed;
+        cursor: pointer;
+    }
+    .planner button.active,
+    .planner button.primary {
+        background: #bda56b;
+        color: #10191e;
+    }
+    .planner button:disabled {
+        opacity: 0.5;
+        cursor: default;
+    }
+    .planner button.primary {
+        margin: 18px 8px 0 0;
+    }
+    .fields {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+    }
+    .planner label {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        font-size: 13px;
+    }
+    .planner input:not([type='checkbox']),
+    .planner select {
+        width: 100%;
+        padding: 8px;
+        background: #101c23;
+        color: #c4deed;
+        border: 1px solid #506775;
+        border-radius: 4px;
+        color-scheme: dark;
+    }
+    .planner label.check {
+        flex-direction: row;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 0;
+    }
+    .planner input[type='checkbox'] {
+        accent-color: #cbb072;
+    }
+    .note,
+    .planner small {
+        font-size: 12px;
+        line-height: 1.6;
+        color: #96b8c9;
+    }
+    .loadouts {
+        display: flex;
+        gap: 20px;
+        flex-wrap: wrap;
+    }
+    .ability-list {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 2px 15px;
+        max-height: 280px;
+        overflow: auto;
+        border: 1px solid #344c58;
+        padding: 10px;
+        margin: 12px 0;
+    }
+    .ability-list.ammo {
+        max-height: 170px;
+    }
+    .phase-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        border: 1px solid #344c58;
+        border-radius: 4px;
+        padding: 12px;
+        margin: 12px 0;
+    }
+    .results {
+        display: flex;
+        gap: 30px;
+        flex-wrap: wrap;
+        margin: 16px 0;
+    }
+    .results span {
+        display: block;
+        font-size: 12px;
+    }
+    .results strong {
+        font-size: 21px;
+        color: #e4c377;
+    }
+    .error {
+        color: #ffada4;
+    }
+    .planner svg {
+        width: 100%;
+        background: #10191e;
+        border: 1px solid #344c58;
+        border-radius: 4px;
+        margin-top: 12px;
+    }
+    .planner li {
+        font-size: 12px;
+        margin: 5px 0;
+    }
+    .planner details {
+        margin: 12px 0;
+    }
+    @media (max-width: 600px) {
+        .fields,
+        .ability-list {
+            grid-template-columns: 1fr;
+        }
+        .planner {
+            padding: 15px;
+        }
+    }
+</style>

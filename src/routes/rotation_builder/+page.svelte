@@ -1,4 +1,6 @@
 <script lang="ts">
+    import RotationPlanner from '$components/RotationBuilder/RotationPlanner.svelte';
+    const plannerEnabled = import.meta.env.VITE_VORKATH_PLANNER === 'true';
     import { LatestWorker } from '$lib/utils/latestWorker';
     import { snapshotEditorCalculation } from '$lib/calc/rotation_builder/editorCalculation';
     import { timelineRows } from '$lib/calc/rotation_builder/timelineRows';
@@ -817,6 +819,7 @@
                         {#each modes as mode}<button class:active={uiStore.activeTool === mode.value} aria-pressed={uiStore.activeTool === mode.value} onclick={() => selectMode(mode.value)}>{mode.label} <kbd>{mode.key}</kbd></button>{/each}
                     </div>
                     <p class="mode-hint">{modes.find(mode => mode.value === uiStore.activeTool)?.hint}</p>
+                    {#if plannerEnabled}<RotationPlanner {refreshUI} />{/if}
                     <ShiftRotation {refreshUI} />
                     {#if !usedTicks}<div class="timeline-empty"><strong>Add your first ability above</strong><span>Abilities append at the next available tick. Configure your gear in Settings to get meaningful damage estimates.</span></div>{/if}
                     <div
