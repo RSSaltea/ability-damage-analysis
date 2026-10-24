@@ -9,10 +9,12 @@ import {
     resolveTumekensAsphyxiate
 } from '../rotation_builder/rotation-damage-calculator';
 import { COOLDOWN_PREFIX } from '../rotation_builder/damage_calc_new';
+import { startCrystalChannel } from '../rotation_builder/adrenalineEvents';
+import { CONSUMABLES } from '../../special/abilities';
 import { applyActionAmmo } from '../rotation_builder/quiver';
 import type { RotationInput } from '../types';
 
-export type Choice = { ability: string | null; ammo?: number };
+export type Choice = { ability: string | null; ammo?: number; distance?: number };
 export interface PlannerInput {
     settings: Record<string, any>;
     rotation: RotationInput;
@@ -28,6 +30,9 @@ export interface PlannerInput {
     seed: number;
     stayInBurst?: boolean;
     stackDetours?: boolean;
+    fightStart?: number;
+    positioning?: { distances: number[]; meleeOwner: boolean; moveTicks: number };
+    preparation?: { wars: number; travel: number; dummy: number };
     phaseGoals?: { name: string; start: number; end: number; damage: number }[];
 }
 export interface Plan {
@@ -267,6 +272,22 @@ export function validatePlanner(input: PlannerInput) {
         input.end <= input.start
     )
         throw Error('Choose a valid tick range within ticks 0-299.');
+    if (
+        input.positioning &&
+        (!input.positioning.distances.length ||
+            input.positioning.distances.some((d) => ![0, 1, 2, 3].includes(d)) ||
+            !Number.isInteger(input.positioning.moveTicks) ||
+            input.positioning.moveTicks < 1 ||
+            input.positioning.moveTicks > 20)
+    )
+        throw Error('Choose allowed distances and 1-20 ticks to reposition.');
+    if (
+        input.fightStart != null &&
+        (!Number.isInteger(input.fightStart) ||
+            input.fightStart < input.start ||
+            input.fightStart >= input.end)
+    )
+        throw Error('The fight must start inside the search window.');
     if (!Number.isFinite(input.goal) || input.goal <= 0)
         throw Error('Enter a positive damage target.');
     if (!input.abilities.length || input.abilities.some((key) => !abils[key]))
@@ -308,11 +329,21 @@ export function evaluatePlan(
     generate = true
 ): Plan {
     const rotation = structuredClone(input.rotation);
+    let moveUntil = -1;
+    let previousDistance: number | undefined;
+    const positionChoices = (items: Choice[]) =>
+        input.positioning
+            ? items.flatMap((c) =>
+                  input.positioning!.distances.map((distance) => ({ ...c, distance }))
+              )
+            : items;
     const allowed = new Set(input.abilities);
-    const choices: Choice[] = input.abilities.flatMap((ability) =>
-        abils[ability].mainStyle === 'ranged' && input.ammo.length
-            ? input.ammo.map((ammo) => ({ ability, ammo }))
-            : [{ ability }]
+    const choices: Choice[] = positionChoices(
+        input.abilities.flatMap((ability) =>
+            abils[ability].mainStyle === 'ranged' && input.ammo.length
+                ? input.ammo.map((ammo) => ({ ability, ammo }))
+                : [{ ability }]
+        )
     );
     const random = randomSource(seed);
     const output: Choice[] = [];
@@ -367,7 +398,12 @@ export function evaluatePlan(
             rotation.abilityBar[t] = null;
             rotation.stalledAbilities[t] = null;
             if (rotation.releasedAbilities) rotation.releasedAbilities[t] = null;
-            if (rotation.tickEvents?.[t]) delete rotation.tickEvents[t]!.castAmmo;
+            if (rotation.tickEvents?.[t]) {
+                delete rotation.tickEvents[t]!.castAmmo;
+                if (input.positioning && t > (input.fightStart ?? input.start))
+                    delete rotation.tickEvents[t]!.ghraziDistance;
+            }
+            if (input.preparation && t < input.preparation.wars) rotation.extraActionBar[t] = [];
         }
     // Seed the activity bounds for the dynamic construction pass. The final static
     // replay below always calculates familiar uptime from the actual chosen casts.
@@ -381,6 +417,14 @@ export function evaluatePlan(
         if (!rot || tick < input.start || tick >= input.end) return;
         if (generate) rot.abilityBar[tick] = null;
         if (generate && tick < next) return;
+        if (generate && s._encounterStage === 'travel') {
+            next = tick + 1;
+            return;
+        }
+        if (generate && tick < moveUntil) {
+            next = tick + 1;
+            return;
+        }
         if (!generate) {
             const updated = burstStyle(s, focus);
             if (updated !== focus) detoured = false;
@@ -400,6 +444,10 @@ export function evaluatePlan(
                 valid = false;
                 reason = `Ability unavailable at tick ${tick}: ${abils[ability]?.title ?? ability}`;
             }
+            if (ability && s._encounterStage === 'travel') {
+                valid = false;
+                reason = 'Cannot attack while travelling.';
+            }
             if (ability) {
                 if (input.stayInBurst && focus && abils[ability].mainStyle !== focus)
                     pendingDetour = {
@@ -417,15 +465,27 @@ export function evaluatePlan(
         if (updated !== focus) detoured = false;
         focus = updated;
         const preferred = genes[decision++];
-        const duringPause = (choice: Choice) =>
-            !state?.pauseTicksRemaining ||
-            !choice.ability ||
-            abils[choice.ability].abilityClassification === 'self cast';
+        const duringPause = (choice: Choice) => {
+            if (!choice.ability) return true;
+            if (input.preparation) {
+                const boundary =
+                    tick < input.preparation.wars
+                        ? input.preparation.wars
+                        : tick < (input.fightStart ?? 0)
+                          ? input.fightStart!
+                          : input.end;
+                if (tick + duration(choice.ability, s) > boundary) return false;
+            }
+            return (
+                !state?.pauseTicksRemaining ||
+                abils[choice.ability].abilityClassification === 'self cast'
+            );
+        };
         const legal = choices.filter(
             (choice) =>
                 canUse(choice, s, timers, allowed) && policy(choice, s) && duringPause(choice)
         );
-        const chosen =
+        let chosen: Choice =
             preferred &&
             canUse(preferred, s, timers, allowed) &&
             policy(preferred, s) &&
@@ -434,6 +494,36 @@ export function evaluatePlan(
                 : legal.length
                   ? legal[Math.floor(random() * legal.length)]
                   : { ability: null };
+        if (input.positioning && s._encounterStage !== 'dummy' && chosen.distance != null) {
+            const current = previousDistance ?? Number(s[SETTINGS.GHRAZI_DISTANCE] ?? 3);
+            if (chosen.distance !== current) {
+                rot.tickEvents[tick] = {
+                    ...rot.tickEvents[tick],
+                    ghraziDistance: chosen.distance,
+                    ghraziAoeRole: input.positioning.meleeOwner
+                };
+                s[SETTINGS.GHRAZI_DISTANCE] = chosen.distance;
+                s._ghraziAoeRole = input.positioning.meleeOwner;
+                previousDistance = chosen.distance;
+                moveUntil = tick + input.positioning.moveTicks;
+                if (moveUntil > tick) {
+                    output.push({ ability: null, distance: chosen.distance });
+                    next = moveUntil;
+                    return;
+                }
+            }
+        }
+        if (
+            input.preparation &&
+            tick < input.preparation.wars &&
+            (!chosen.ability || abils[chosen.ability].abilityClassification === 'self cast')
+        ) {
+            rot.extraActionBar[tick] = [
+                ...(rot.extraActionBar[tick] ?? []),
+                CONSUMABLES.ADRENALINE_CRYSTAL
+            ];
+            startCrystalChannel(s, tick);
+        }
         output.push(chosen);
         remember(chosen, s);
         if (!chosen.ability) {
@@ -457,6 +547,10 @@ export function evaluatePlan(
             if (!rot || tick < input.start || tick >= input.end) return;
             const key = rot.abilityBar[tick];
             if (!key) return;
+            if (s._encounterStage === 'travel') {
+                valid = false;
+                reason = 'Cannot attack while travelling.';
+            }
             const updated = burstStyle(s, focus);
             if (updated !== focus) detoured = false;
             focus = updated;
@@ -497,8 +591,13 @@ export function evaluatePlan(
         input.scope === 'all'
             ? (result.impactDamagePerTick ?? [])
             : (result.mainImpactDamagePerTick ?? []),
-        input
+        { ...input, start: input.fightStart ?? input.start }
     );
+    // Keep curves aligned with the editable window; preparation is zero boss damage.
+    if ((input.fightStart ?? input.start) > input.start) {
+        score.curve.unshift(...Array(input.fightStart! - input.start).fill(0));
+        if (score.reached !== null) score.reached += input.fightStart! - input.start;
+    }
     const impacts =
         input.scope === 'all'
             ? (result.impactDamagePerTick ?? [])
@@ -590,6 +689,14 @@ export async function searchRotations(
                             : input.abilities[Math.floor(random() * input.abilities.length)];
                     genes[pos] = {
                         ability,
+                        ...(input.positioning
+                            ? {
+                                  distance:
+                                      input.positioning.distances[
+                                          Math.floor(random() * input.positioning.distances.length)
+                                      ]
+                              }
+                            : {}),
                         ...(ability && abils[ability].mainStyle === 'ranged' && input.ammo.length
                             ? { ammo: input.ammo[Math.floor(random() * input.ammo.length)] }
                             : {})

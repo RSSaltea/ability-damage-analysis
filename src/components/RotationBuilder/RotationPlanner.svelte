@@ -3,6 +3,7 @@
     import { phaseStackOptions } from '$lib/calc/rotation_builder/phaseStacks';
     import { normalizeTickEvent } from '$lib/calc/rotation_builder/tickEvents';
     import { SETTINGS } from '$lib/calc/settings_rb';
+    import { addPreparation, damageShare } from '$lib/calc/planner/encounter';
     import { abils } from '$lib/data/abilities';
     import { getEquipment, equipment } from '$lib/data/equipment';
     import { bossPresets } from '$lib/data/bosses/boss_presets';
@@ -32,6 +33,27 @@
         stayInBurst = $state(true),
         stackDetours = $state(true);
     let phases = $state<any[]>([]);
+    let team = $state(false),
+        dealers = $state(2),
+        extras = $state(0),
+        extraContribution = $state(0);
+    let autoDistance = $state(false),
+        meleeOwner = $state(true),
+        moveTicks = $state(3);
+    let distances = $state([2, 3]);
+    let prep = $state(false),
+        warsTicks = $state(20),
+        travelSeconds = $state(6),
+        dummyTicks = $state(0);
+    let dummyAvailable = $state(false);
+    let prepTicks = $derived(
+        prep ? warsTicks + Math.ceil(travelSeconds / 0.6) + (dummyAvailable ? dummyTicks : 0) : 0
+    );
+    let share = $derived(team ? 1 / Math.max(1, dealers + (extras * extraContribution) / 100) : 1);
+    function addWars() {
+        prep = true;
+        start = 0;
+    }
     let styles = $state(['ranged']),
         allowed = $state<string[]>([]),
         ammo = $state<number[]>([]);
@@ -101,6 +123,8 @@
                   : snapshot.style
         ];
         mode = 1;
+        prep = false;
+        autoDistance = false;
         phases = snapshot.rotation.tickEvents.flatMap((event: any, tick: number) =>
             event?.phase
                 ? [
@@ -181,7 +205,24 @@
                         clearStacks: undefined,
                         downtime: undefined
                     });
-            const ordered = [...phases].sort((a, b) => a.tick - b.tick);
+            const fraction = team ? damageShare(dealers, extras, extraContribution) : 1;
+            let ordered = [...phases].sort((a, b) => a.tick - b.tick);
+            let fightStart = start;
+            if (prep) {
+                if (start !== 0 || !Number.isFinite(travelSeconds) || travelSeconds < 0)
+                    throw Error('Preparation starts at tick 0. Enter a non-negative travel time.');
+                const setup = addPreparation(
+                    rotation,
+                    ordered,
+                    warsTicks,
+                    Math.ceil(travelSeconds / 0.6),
+                    dummyAvailable ? dummyTicks : 0
+                );
+                ordered = setup.phases;
+                fightStart = setup.fight;
+            }
+            const end = fightStart + ticks;
+            if (end > 300) throw Error('Preparation and fighting must fit within 300 ticks.');
             for (const p of ordered)
                 rotation.tickEvents[p.tick] = normalizeTickEvent({
                     ...rotation.tickEvents[p.tick],
@@ -189,15 +230,20 @@
                     downtime: p.downtime,
                     clearStacks: p.clearStacks
                 });
-            rotation.targetCounts[start] = targets;
-            rotation.tickEvents[start] = {
-                ...rotation.tickEvents[start],
+            rotation.targetCounts[fightStart] = targets;
+            rotation.tickEvents[fightStart] = {
+                ...rotation.tickEvents[fightStart],
+                ...(autoDistance ? { ghraziAoeRole: meleeOwner } : {}),
                 target: settings[SETTINGS.BOSS_PRESET],
                 automaticAccuracy: settings[SETTINGS.AUTO_ACCURACY],
                 accuracy: settings[SETTINGS.HIT_CHANCE],
                 ghraziDistance: settings[SETTINGS.GHRAZI_DISTANCE]
             };
             const clean = JSON.parse(JSON.stringify(settings));
+            if (prep) {
+                clean[SETTINGS.BOSS_PATTERN_START] = fightStart;
+                settings[SETTINGS.BOSS_PATTERN_START] = fightStart;
+            }
             attachGearPerks(clean, new Map(snapshot.ownedGear));
             request = {
                 settings: clean,
@@ -205,9 +251,22 @@
                 abilities: allowed.filter((key) => candidates.includes(key)),
                 ammo: styles.includes('ranged') ? [...ammo] : [],
                 start,
-                end: start + ticks,
+                end,
+                fightStart,
+                ...(prep
+                    ? {
+                          preparation: {
+                              wars: warsTicks,
+                              travel: Math.ceil(travelSeconds / 0.6),
+                              dummy: dummyAvailable ? dummyTicks : 0
+                          }
+                      }
+                    : {}),
+                ...(autoDistance && /ghrazi/i.test(settings[SETTINGS.BOSS_PRESET] ?? '')
+                    ? { positioning: { distances: [...distances], meleeOwner, moveTicks } }
+                    : {}),
                 objective,
-                goal,
+                goal: goal * fraction,
                 scope,
                 iterations: 10000,
                 seconds,
@@ -215,18 +274,13 @@
                 stayInBurst,
                 stackDetours,
                 phaseGoals: ordered.flatMap((p, i) =>
-                    p.damage > 0 &&
-                    p.tick < start + ticks &&
-                    (ordered[i + 1]?.tick ?? start + ticks) > start
+                    p.damage > 0 && p.tick < end && (ordered[i + 1]?.tick ?? end) > fightStart
                         ? [
                               {
                                   name: p.name,
-                                  start: Math.max(start, p.tick),
-                                  end: Math.min(
-                                      start + ticks,
-                                      ordered[i + 1]?.tick ?? start + ticks
-                                  ),
-                                  damage: p.damage
+                                  start: Math.max(fightStart, p.tick),
+                                  end: Math.min(end, ordered[i + 1]?.tick ?? end),
+                                  damage: p.damage * fraction
                               }
                           ]
                         : []
@@ -360,7 +414,9 @@
                     ></label
                 >
                 {#if objective === 'time'}<label
-                        >Damage / remaining HP target<input
+                        >{team
+                            ? 'Team damage / remaining HP target'
+                            : 'Your damage / remaining HP target'}<input
                             type="number"
                             min="1"
                             bind:value={goal}
@@ -391,26 +447,128 @@
                     /></label
                 >
                 <label
-                    >Start tick<input
+                    >Keep existing setup before tick<input
                         type="number"
                         min="0"
                         max="299"
                         step="1"
                         bind:value={start}
-                    /></label
+                        disabled={prep}
+                    /><small
+                        >0 rebuilds from the beginning. A later tick keeps everything before it.</small
+                    ></label
                 >
                 <label
                     >{objective === 'time' ? 'Maximum search window' : 'Time limit'} (ticks)<input
                         type="number"
                         min="1"
-                        max={300 - start}
+                        max={300 - start - prepTicks}
                         step="1"
                         bind:value={ticks}
                     /><small
-                        >{(ticks * 0.6).toFixed(1)} seconds; ticks {start} to {start + ticks - 1} inclusive</small
+                        >{(ticks * 0.6).toFixed(1)} seconds of fighting; starts at tick {prep
+                            ? prepTicks
+                            : start}</small
                     ></label
                 >
             </div>
+            <h3>Team and damage share</h3>
+            <label class="check"
+                ><input type="checkbox" bind:checked={team} /> Plan my share of a team fight</label
+            >
+            {#if team}<div class="fields">
+                    <label
+                        >Damage dealers (including you)<input
+                            type="number"
+                            min="1"
+                            max="50"
+                            step="1"
+                            bind:value={dealers}
+                        /></label
+                    >
+                    <label
+                        >Additional players (+1, +2...)<input
+                            type="number"
+                            min="0"
+                            max="50"
+                            step="1"
+                            bind:value={extras}
+                        /></label
+                    >
+                    <label
+                        >Each extra player's contribution (% of a dealer)<input
+                            type="number"
+                            min="0"
+                            max="100"
+                            bind:value={extraContribution}
+                        /></label
+                    >
+                </div>
+                <p class="note">
+                    {dealers}+{extras}: your share is {(share * 100).toFixed(1)}% ({Math.round(
+                        goal * share
+                    ).toLocaleString()} damage). Active dealers share equally; 0% extras add no damage.
+                    Enter the boss HP for your actual team size above; HP scaling is not guessed. Phase
+                    requirements use this same share.
+                </p>{/if}
+            <h3>Before the fight</h3>
+            {#if !prep}<button onclick={addWars}>Add Wars and travel</button>{:else}
+                <div class="fields">
+                    <label
+                        >Wars prebuild cap (ticks)<input
+                            type="number"
+                            min="1"
+                            max="200"
+                            step="1"
+                            bind:value={warsTicks}
+                        /><small
+                            >{(warsTicks * 0.6).toFixed(1)} seconds; unused time can be spent waiting.</small
+                        ></label
+                    >
+                    <label
+                        >Travel to the instance (seconds)<input
+                            type="number"
+                            min="0"
+                            max="120"
+                            step="0.6"
+                            bind:value={travelSeconds}
+                        /></label
+                    >
+                </div>
+                <label class="check"
+                    ><input type="checkbox" bind:checked={dummyAvailable} /> I can place a dummy before
+                    starting this fight</label
+                >
+                {#if dummyAvailable}<label
+                        >In-instance dummy prebuild cap (ticks)<input
+                            type="number"
+                            min="0"
+                            max="200"
+                            step="1"
+                            bind:value={dummyTicks}
+                        /></label
+                    >{/if}
+                <p class="note">
+                    Wars → Travel{dummyAvailable && dummyTicks > 0 ? ' → Prebuild' : ''} → Fight at tick
+                    {prepTicks}. Setup is rebuilt using allowed abilities. Travel has no attacks;
+                    buffs and cooldowns keep ticking. Dummy damage does not count toward boss
+                    damage. Existing actions inside the new setup section are replaced.
+                </p>
+                <button onclick={() => (prep = false)}>Remove preparation sections</button>
+            {/if}
+            <p class="note">
+                PvME examples: <a
+                    href="https://pvme.io/pvme-guides/rs3-full-boss-guides/angel-of-death-small-teams/magic-melee-hybrid-base/"
+                    target="_blank"
+                    rel="noreferrer">AoD hybrid prebuild</a
+                >
+                ·
+                <a
+                    href="https://pvme.io/pvme-guides/one-tick-guides/basic-one-ticks/"
+                    target="_blank"
+                    rel="noreferrer">Wars and instance prebuilds</a
+                >. Dummy availability and travel time depend on the encounter.
+            </p>
             <label class="check"
                 ><input type="checkbox" bind:checked={settings[SETTINGS.AUTO_ACCURACY]} /> Calculate
                 accuracy from target and gear</label
@@ -423,8 +581,49 @@
                         bind:value={settings[SETTINGS.HIT_CHANCE]}
                     /></label
                 >{/if}
-            {#if /ghrazi/i.test(settings[SETTINGS.BOSS_PRESET] ?? '')}<label
-                    >Distance between knights<select bind:value={settings[SETTINGS.GHRAZI_DISTANCE]}
+            {#if /ghrazi/i.test(settings[SETTINGS.BOSS_PRESET] ?? '')}
+                <label class="check"
+                    ><input type="checkbox" bind:checked={autoDistance} /> Let the planner choose knight
+                    distance during the fight</label
+                >
+                {#if autoDistance}
+                    <div class="fields">
+                        <label
+                            >Separated-knights melee AoE position<select bind:value={meleeOwner}
+                                ><option value={true}>Mine (one player only)</option><option
+                                    value={false}>Another player's</option
+                                ></select
+                            ></label
+                        >
+                        <label
+                            >Ticks spent repositioning<input
+                                type="number"
+                                min="1"
+                                max="20"
+                                step="1"
+                                bind:value={moveTicks}
+                            /></label
+                        >
+                    </div>
+                    {#each [3, 2, 1, 0] as distance}<label class="check"
+                            ><input
+                                type="checkbox"
+                                checked={distances.includes(distance)}
+                                onchange={(e) =>
+                                    (distances = e.currentTarget.checked
+                                        ? [...distances, distance]
+                                        : distances.filter((d) => d !== distance))}
+                            />{distance === 0 ? 'Overlapping' : `${distance} clear tiles`}</label
+                        >{/each}
+                    <p class="note">
+                        Repositioning costs attack time. At 3+ clear tiles, only the assigned player
+                        with an equipped halberd-range melee loadout gets both targets; other
+                        attacks count one. Proximity accuracy is approximate. Your teammate must
+                        coordinate these movements.
+                    </p>
+                {/if}<label
+                    >Initial distance between knights<select
+                        bind:value={settings[SETTINGS.GHRAZI_DISTANCE]}
                         ><option value={3}>3+ clear tiles</option><option value={2}
                             >2 clear tiles</option
                         ><option value={1}>1 clear tile</option><option value={0}
@@ -433,17 +632,20 @@
                     ></label
                 >{/if}
             <p class="note">
-                Actions before the start tick are kept as setup. Existing phase boundaries, target
-                changes, off-GCD actions, gear swaps and adrenaline overrides stay fixed. Casts
-                inside the search window are replaced only when you apply a result.
+                Actions before the replacement tick are kept as setup. Outside rebuilt preparation,
+                scripted utilities and gear swaps stay fixed. Automatic positioning may replace
+                distance changes. Casts inside the search window are replaced only when you apply a
+                result.
             </p>
             <details class="phases">
                 <summary>Fight phases ({phases.length})</summary>
                 <p class="note">
-                    Set scheduled phase starts and invulnerable ticks. Cooldowns and resources carry
-                    between phases unless you select a reset. Optional damage requirements must be
-                    met before the next phase; the search prioritises meeting all of them. Known
-                    boss HP-triggered transitions are also simulated from the selected boss preset.
+                    Set scheduled phase starts and invulnerable ticks. With preparation enabled,
+                    fight sections shift together to follow preparation. Cooldowns and resources
+                    carry between phases unless you select a reset. Optional damage requirements
+                    must be met before the next phase; the search prioritises meeting all of them.
+                    Known boss HP-triggered transitions are also simulated from the selected boss
+                    preset.
                 </p>
                 {#each phases as phase, i}<div class="phase-row">
                         <label>Phase name<input bind:value={phase.name} /></label><label
@@ -617,9 +819,9 @@
             <p class="note">
                 Searches complete sequences, including waits, using expected damage and adrenaline.
                 It preserves your scripted utilities, conjures, stalls and releases outside the
-                search window; it does not invent new pre-fight crystal use or unconfigured
-                equipment swaps. Results depend on the simulator's accuracy and are the best found,
-                not a proof of the global optimum.
+                search window; Wars can use the adrenaline crystal alongside self-buffs or waits. It
+                does not invent stalls/releases or unconfigured equipment swaps. Results depend on
+                the simulator's accuracy and are the best found, not a proof of the global optimum.
             </p>
             <button class="primary" onclick={run}>Search rotations</button>
         {:else}
@@ -652,7 +854,12 @@
                             <span>Time to damage target</span><strong
                                 >{result.best.reached === null
                                     ? 'Not reached in this window'
-                                    : (result.best.reached * 0.6).toFixed(1) + ' seconds'}</strong
+                                    : (
+                                          (result.best.reached -
+                                              ((request.fightStart ?? request.start) -
+                                                  request.start)) *
+                                          0.6
+                                      ).toFixed(1) + ' seconds'}</strong
                             >
                         </div>{/if}
                 </div>
@@ -695,7 +902,17 @@
                         are met.
                     </p>{/if}
                 <details>
-                    <summary>Review the proposed casts</summary>
+                    <summary>Review the proposed casts and positioning</summary>
+                    {#each result.best.rotation.tickEvents as event, tick}
+                        {#if tick >= request.start && tick < displayEnd && (event?.phase || event?.ghraziDistance != null)}
+                            <p>
+                                Tick {tick}: {event.phase ?? ''}
+                                {event.ghraziDistance != null
+                                    ? `Knights: ${event.ghraziDistance} clear tiles`
+                                    : ''}
+                            </p>
+                        {/if}
+                    {/each}
                     <ol>
                         {#each result.best.rotation.abilityBar.slice(request.start, displayEnd) as ability, i}{#if ability}<li
                                 >

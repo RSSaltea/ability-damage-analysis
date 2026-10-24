@@ -1,3 +1,4 @@
+import { getEquipment, equipmentMechanicId } from '$lib/data/equipment';
 import {captureDamageBuffs} from './castDamageBuffs';
 import { clearPhaseStacks } from './phaseStacks';
 import { recalcFulProbability, rollFulHit } from './ful';
@@ -590,6 +591,18 @@ function prepareTick(state: RotationState, settings: any, rotation: RotationInpu
     settings._teamDebuffs = teamTargets[targetId] ?? {};
     settings._rotationTick = state.tick;
     settings._malachiResetOverride = event?.malachiReset;
+    if (event?.encounterStage && state.tick > 0) interruptCrystalChannel(settings);
+    if (event?.encounterStage && event.encounterStage !== settings._encounterStage) {
+        if (settings._encounterStage && settings._encounterStage !== 'fight') {
+            state.damageQueue = {}; // Dummy projectiles/bleeds cannot follow us into the boss.
+            state.secondaryBik = {};
+            settings._chainPending = null;
+            settings._chainCast = null;
+            settings[SETTINGS.GREATER_CHAIN] = false;
+            settings[SETTINGS.BIK_STACKS] = 0;
+        }
+        settings._encounterStage = event.encounterStage;
+    }
     applyAccuracyEvent(settings, event);
     prepareAdrenalineTick(settings, state.tick, event);
     if (event?.phase) {
@@ -741,7 +754,13 @@ function processTickOperations(
     handleTimers(state.timers, settingsCopy);
     // Pre-fight actions still advance buffs, gear and cooldowns. Discard hits
     // landing before Start Tick and keep all damage sources out of boss HP.
-    if (tickToProcess < (settingsCopy[SETTINGS.BOSS_PATTERN_START] ?? -1)) {
+    if (settingsCopy._encounterStage === 'dummy') {
+        // Resolve hit-driven resources, but never credit dummy damage or advance boss phases.
+        processQueuedDamage(tickToProcess, state, settingsCopy);
+        state.tick += 1;
+        return;
+    }
+    if (settingsCopy._encounterStage === 'travel' || tickToProcess < (settingsCopy[SETTINGS.BOSS_PATTERN_START] ?? -1)) {
         delete state.damageQueue[tickToProcess];
         state.tick += 1;
         return;
@@ -1552,11 +1571,21 @@ function hitTargets(state: RotationState, settings: any, object: DamageObject, k
     const eligible = locateAtCast
         && ability.mainStyle === 'ranged' && ability.abilityClassification !== 'self cast'
         && ability.abilityType !== 'proc' && !excluded;
-    const inRange = targetCountAt(state.targetCounts, state.tick);
+    let inRange = targetCountAt(state.targetCounts, state.tick);
+    if (settings._ghraziAoeRole != null && /ghrazi/i.test(settings[SETTINGS.BOSS_PRESET] ?? '')
+        && Number(settings[SETTINGS.GHRAZI_DISTANCE]) >= 3) {
+        const meleeWeapon = getEquipment(equipmentMechanicId(settings[SETTINGS.MELEE_TH]));
+        const hasReach = /halberd|scythe|dragon rider lance|laniakea/i.test(meleeWeapon?.name ?? '');
+        if (!(settings._ghraziAoeRole && ability.mainStyle === 'melee' && hasReach
+            && settings[SETTINGS.WEAPON_TYPE_MELEE] === 'two-hand')) inRange = 1;
+    }
     const chain = ability.mainStyle === 'magic' && ability.abilityType !== 'proc' ? settings._chainCast : null;
     const areaCap = key === ABILITIES.POWERSTAB ? 25
         : [ABILITIES.METEOR_STRIKE, ABILITIES.SUNFALL_SLAM, ABILITIES.SWEEP, ABILITIES.SWEEP_HIT].includes(key) ? 9 : 0;
-    const count = chain?.targets ?? (areaCap ? Math.min(areaCap, inRange)
+    const meleeArea = [ABILITIES.HURRICANE_1, ABILITIES.HURRICANE_2, ABILITIES.BLOODLUST_HURRICANE_HIT].includes(key) ? 9 : 0;
+    const chainTargets = chain && settings._ghraziAoeRole != null && /ghrazi/i.test(settings[SETTINGS.BOSS_PRESET] ?? '')
+        && Number(settings[SETTINGS.GHRAZI_DISTANCE]) >= 3 ? Math.min(chain.targets, inRange) : chain?.targets;
+    const count = chainTargets ?? (areaCap || meleeArea ? Math.min(areaCap || meleeArea, inRange)
         : eligible ? Math.min(6, inRange) : 1);
     const results: DamageObject[] = [];
     state.secondaryBik ??= {};
@@ -1692,6 +1721,7 @@ function processQueuedDamage(tick: number, state: RotationState, settingsCopy: a
             (delayedObj as any)._originTick = (namedDmgObject as any)._originTick;
             (state.damageQueue[tick + 1] ??= []).push(delayedObj);
         }
+        if (settingsCopy._encounterStage === "dummy") continue;
         for (const dmgObj of damageObjects) {
             if (targetIndex > 0) {
                 const damage = Math.floor(applySoftCap(get_user_value(settingsCopy, dmgObj), settingsCopy['_softCap']) * scale);
