@@ -14,6 +14,8 @@ import { CONSUMABLES } from '../../special/abilities';
 import { applyActionAmmo } from '../rotation_builder/quiver';
 import type { RotationInput } from '../types';
 import { MAX_ROTATION_TICKS } from './limits';
+import { resetPreparationResources } from './encounter';
+import { maxAdrenaline } from '../rotation_builder/calculation_utils';
 
 export type Choice = { ability: string | null; ammo?: number; distance?: number };
 export interface PlannerInput {
@@ -25,6 +27,7 @@ export interface PlannerInput {
     end: number;
     objective: 'damage' | 'time';
     untilTarget?: boolean;
+    zeroStartingResources?: boolean;
     goal: number;
     scope: 'main' | 'all';
     iterations: number;
@@ -427,6 +430,7 @@ export function evaluatePlan(
         ...input.settings,
         [SETTINGS.CALC_TYPE]: SETTINGS.CALC_TYPE_VALUES.ROTATION
     };
+    if (input.preparation || input.zeroStartingResources) resetPreparationResources(settings);
     const select = (tick: number, s: any, timers: any, rot?: RotationInput, state?: any) => {
         if (!generate) checkDetour(tick, s);
         if (!rot || tick < input.start || tick >= input.end) return;
@@ -500,6 +504,8 @@ export function evaluatePlan(
             (choice) =>
                 canUse(choice, s, timers, allowed) && policy(choice, s) && duringPause(choice)
         );
+        // Waiting at the crystal is a real preparation action, not free starting adrenaline.
+        if (input.preparation && tick < input.preparation.wars) legal.push({ ability: null });
         let chosen: Choice =
             preferred &&
             canUse(preferred, s, timers, allowed) &&
@@ -531,7 +537,9 @@ export function evaluatePlan(
         if (
             input.preparation &&
             tick < input.preparation.wars &&
-            (!chosen.ability || abils[chosen.ability].abilityClassification === 'self cast')
+            (!chosen.ability || abils[chosen.ability].abilityClassification === 'self cast') &&
+            (chosen.ability || (s[SETTINGS.ADRENALINE] ?? 0) < maxAdrenaline(s)) &&
+            (chosen.ability || s._crystalNextPulse == null)
         ) {
             rot.extraActionBar[tick] = [
                 ...(rot.extraActionBar[tick] ?? []),

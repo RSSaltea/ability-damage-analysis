@@ -2,7 +2,12 @@ import { it, expect } from 'vitest';
 import { ABILITIES } from '$lib/data/abilities';
 import { equipment } from '$lib/data/equipment';
 import { SETTINGS } from '../../settings_rb';
-import { addPreparation, damageShare } from '../../planner/encounter';
+import {
+    addPreparation,
+    damageShare,
+    preparationResourceKeys,
+    resetPreparationResources
+} from '../../planner/encounter';
 import { evaluatePlan, type PlannerInput } from '../../planner/planner';
 import { calculateRotationDamageCore } from '../../rotation_builder/rotation-damage-calculator';
 import { normalizeTickEvent } from '../../rotation_builder/tickEvents';
@@ -32,6 +37,56 @@ function setup(): PlannerInput {
         seed: 1
     };
 }
+it('builds Wars resources from zero even if the editor supplied starting stacks', () => {
+    const c = setup();
+    addPreparation(c.rotation, [], 9, 6, 0);
+    c.preparation = { wars: 9, travel: 6, dummy: 0 };
+    c.fightStart = 15;
+    c.settings[SETTINGS.BOSS_PATTERN_START] = 15;
+    for (const key of preparationResourceKeys) c.settings[key] = 7;
+    c.settings[SETTINGS.ADRENALINE] = 110;
+    const before = structuredClone(c);
+    const genes = Array(40).fill({ ability: ABILITIES.MELEE_AUTO });
+    const imported = evaluatePlan(c, genes, 2);
+    resetPreparationResources(c.settings);
+    const empty = evaluatePlan(c, genes, 2);
+    expect(imported.rotation).toEqual(empty.rotation);
+    expect(imported.damage).toBe(empty.damage);
+    expect(before.settings[SETTINGS.ICY_CHILL_STACKS]).toBe(7);
+});
+it('uses actual crystal pulses while waiting and restarts it alongside an ultimate', () => {
+    const c = setup();
+    addPreparation(c.rotation, [], 18, 3, 0);
+    c.preparation = { wars: 18, travel: 3, dummy: 0 };
+    c.fightStart = 21;
+    c.settings[SETTINGS.BOSS_PATTERN_START] = 21;
+    c.settings[SETTINGS.WAR_BLESSING_4] = false;
+    const plan = evaluatePlan(
+        c,
+        [
+            ...Array(12).fill({ ability: null }),
+            { ability: ABILITIES.BERSERK },
+            ...Array(40).fill({ ability: null })
+        ],
+        1
+    );
+    expect(plan.valid).toBe(true);
+    expect(plan.rotation.abilityBar[12]).toBe(ABILITIES.BERSERK);
+    const crystals = plan.rotation.extraActionBar.flatMap((actions, t) =>
+        actions?.includes(CONSUMABLES.ADRENALINE_CRYSTAL) ? [t] : []
+    );
+    expect(crystals).toEqual([0, 12]);
+    const clean = { ...c.settings };
+    resetPreparationResources(clean);
+    const values: number[] = [];
+    calculateRotationDamageCore(clean, plan.rotation, c.end, (tick, s) => {
+        values[tick] = s[SETTINGS.ADRENALINE];
+    });
+    expect(values[1]).toBe(25);
+    expect(values[3]).toBe(25);
+    expect(values[4]).toBe(50);
+    expect(values[13]).toBe(25);
+});
 it('stops charging at the Wars exit instead of granting crystal pulses during travel', () => {
     const c = setup();
     addPreparation(c.rotation, [], 3, 9, 0);

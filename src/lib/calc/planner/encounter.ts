@@ -1,5 +1,26 @@
 import { MAX_ROTATION_TICKS } from './limits';
 import type { RotationInput } from '../types';
+import { SETTINGS } from '../settings_rb';
+
+export const preparationResourceKeys = [
+    SETTINGS.ADRENALINE,
+    SETTINGS.BLOODLUST_STACKS,
+    SETTINGS.PRIMORDIAL_ICE,
+    SETTINGS.ICY_CHILL_STACKS,
+    SETTINGS.PERFECT_EQUILIBRIUM_STACKS,
+    SETTINGS.DEATHSPORE_STACKS,
+    SETTINGS.BIK_STACKS,
+    SETTINGS.REAPER_STACKS,
+    SETTINGS.NECROSIS_STACKS,
+    SETTINGS.RESIDUAL_SOULS,
+    SETTINGS.BLOOD_TITHE,
+    SETTINGS.GLACIAL_EMBRACE
+] as const;
+
+/** Wars resources must be earned by simulated actions, never imported as free stacks. */
+export function resetPreparationResources(settings: Record<string, any>) {
+    for (const key of preparationResourceKeys) settings[key] = 0;
+}
 
 export function damageShare(dealers: number, extras: number, contribution: number) {
     if (

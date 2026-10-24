@@ -4,7 +4,11 @@
     import { normalizeTickEvent } from '$lib/calc/rotation_builder/tickEvents';
     import { MAX_ROTATION_TICKS } from '$lib/calc/planner/limits';
     import { SETTINGS } from '$lib/calc/settings_rb';
-    import { addPreparation, damageShare } from '$lib/calc/planner/encounter';
+    import {
+        addPreparation,
+        damageShare,
+        resetPreparationResources
+    } from '$lib/calc/planner/encounter';
     import { abils } from '$lib/data/abilities';
     import { getEquipment, equipment } from '$lib/data/equipment';
     import { bossPresets } from '$lib/data/bosses/boss_presets';
@@ -73,20 +77,6 @@
         ['magic', 'Magic'],
         ['necromancy', 'Necromancy']
     ];
-    const stackFields = [
-        [SETTINGS.ADRENALINE, 'Adrenaline', 130],
-        [SETTINGS.BLOODLUST_STACKS, 'Bloodlust', 8],
-        [SETTINGS.PRIMORDIAL_ICE, 'Primordial Ice', 5],
-        [SETTINGS.ICY_CHILL_STACKS, 'Wen / Icy Chill', 10],
-        [SETTINGS.PERFECT_EQUILIBRIUM_STACKS, 'Bow of the Last Guardian', 7],
-        [SETTINGS.DEATHSPORE_STACKS, 'Deathspore', 5],
-        [SETTINGS.BIK_STACKS, 'Bik', 150],
-        [SETTINGS.REAPER_STACKS, 'Reaper necklace', 30],
-        [SETTINGS.NECROSIS_STACKS, 'Necrosis', 12],
-        [SETTINGS.RESIDUAL_SOULS, 'Residual souls', 5],
-        [SETTINGS.BLOOD_TITHE, 'Blood Tithe', 12],
-        [SETTINGS.GLACIAL_EMBRACE, 'Glacial Embrace', 5]
-    ] as const;
     let candidates = $derived(snapshot ? plannerAbilities(settings, styles) : []);
     let shown = $derived(
         candidates.filter((key) =>
@@ -124,7 +114,8 @@
                   : snapshot.style
         ];
         mode = 1;
-        prep = false;
+        prep = true;
+        start = 0;
         autoDistance = false;
         phases = snapshot.rotation.tickEvents.flatMap((event: any, tick: number) =>
             event?.phase
@@ -252,6 +243,7 @@
                 ghraziDistance: settings[SETTINGS.GHRAZI_DISTANCE]
             };
             const clean = JSON.parse(JSON.stringify(settings));
+            if (prep || start === 0) resetPreparationResources(clean);
             if (prep) {
                 clean[SETTINGS.BOSS_PATTERN_START] = fightStart;
                 settings[SETTINGS.BOSS_PATTERN_START] = fightStart;
@@ -265,6 +257,7 @@
                 start,
                 end,
                 fightStart,
+                zeroStartingResources: prep || start === 0,
                 ...(prep
                     ? {
                           preparation: {
@@ -360,6 +353,8 @@
             r.stalledAbilities[t] = null;
             if (r.releasedAbilities) r.releasedAbilities[t] = null;
         }
+        const appliedSettings = JSON.parse(JSON.stringify(settings));
+        if (request.zeroStartingResources) resetPreparationResources(appliedSettings);
         rotationActions.applyRotationData({
             ...original,
             a: r.abilityBar,
@@ -369,7 +364,7 @@
             r: r.releasedAbilities,
             c: r.targetCounts,
             v: r.tickEvents,
-            s: JSON.parse(JSON.stringify(settings))
+            s: appliedSettings
         });
         refreshUI();
         applied = true;
@@ -759,27 +754,23 @@
                         )?.title ?? 'Custom weapon'}</strong
                     >
                 </p>{/each}
-            <h3>What resources do you start with?</h3>
-            <p class="note">
-                These are tick-0 values. Any setup before the search window changes them naturally.
-                Bloodlust, arrow stacks and other resources then evolve on every hit and cast.
-            </p>
-            <div class="fields">
-                {#each stackFields as [key, label, max]}<label
-                        >{label}<input
-                            type="number"
-                            min="0"
-                            {max}
-                            step="1"
-                            value={settings[key] ?? 0}
-                            onchange={(e) =>
-                                (settings[key] = Math.max(
-                                    0,
-                                    Math.min(max, Number(e.currentTarget.value))
-                                ))}
-                        /></label
-                    >{/each}
-            </div>
+            {#if prep}
+                <h3>Resources are built during preparation</h3>
+                <p class="note">
+                    Wars starts with zero adrenaline and zero stacks. The planner earns adrenaline
+                    through abilities and the crystal, and builds Bloodlust, arrow stacks and other
+                    resources through their actual casts and hits. They carry into the fight only if
+                    they survive travel and the encounter's reset rules. No starting stacks are
+                    granted.
+                </p>
+            {:else}
+                <h3>Resources come from your actions</h3>
+                <p class="note">
+                    A rebuild from tick 0 starts with zero adrenaline and stacks. Add Wars in Fight
+                    &amp; goal to build them before the fight. If you keep an existing prefix, its
+                    simulated state carries into the new rotation.
+                </p>
+            {/if}
             <button class="primary" onclick={() => (step = 2)}>Next: allowed actions</button>
         {:else if step === 2}
             <h3>Which abilities and specials can you use?</h3>
